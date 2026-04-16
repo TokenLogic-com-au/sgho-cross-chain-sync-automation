@@ -1,2 +1,36 @@
+# Environment and secrets (never commit)
 *.env
-node_modules
+.env.*
+!.env.example
+secrets.yaml
+secrets.*.yaml
+
+# Dependencies
+node_modules/
+
+# Foundry — build artifacts and install dir (reinstall with: cd contracts && forge install)
+contracts/cache/
+contracts/out/
+contracts/broadcast/
+contracts/lib/
+
+# TypeScript / CRE workflow build output
+cross-chain-sync/dist/
+*.tsbuildinfo
+
+# CRE CLI / tooling temp files
+**/.cre_build_tmp.js
+**/.cre_build_tmp.*
+
+# OS and editors
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+
+# Logs and coverage
+*.log
+coverage/
+.nyc_output/

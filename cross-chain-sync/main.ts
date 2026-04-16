@@ -1,28 +1,50 @@
-import { CronCapability, handler, Runner, type Runtime } from "@chainlink/cre-sdk";
+import {
+  CronCapability,
+  Runner,
+  handler,
+  type Runtime,
+} from "@chainlink/cre-sdk";
+import { configSchema, type Config } from "./config";
+import { readNeedsUpkeep, submitSyncReport } from "./evm";
 
-export type Config = {
-  schedule: string;
-};
+export type { Config } from "./config";
 
 export const onCronTrigger = (runtime: Runtime<Config>): string => {
-  runtime.log("Hello world! Workflow triggered.");
-  return "Hello world!";
+  const cfg = runtime.config;
+
+  const upkeepNeeded = readNeedsUpkeep(runtime, cfg);
+  runtime.log(`needsUpkeep (on-chain): ${upkeepNeeded}`);
+
+  if (!upkeepNeeded) {
+    return "Skip sync: needsUpkeep is false (oracle pool balance >= on-chain threshold)";
+  }
+
+  const amount = BigInt(cfg.syncAmount);
+  if (amount === 0n) {
+    throw new Error("syncAmount must be non-zero when triggering sync");
+  }
+
+  const dest = BigInt(cfg.destChainSelector);
+  if (dest > (1n << 64n) - 1n || dest < 0n) {
+    throw new Error("destChainSelector must fit uint64");
+  }
+
+  const txHash = submitSyncReport(runtime, cfg, amount, dest);
+  runtime.log(`Sync writeReport tx: ${txHash}`);
+  return `Submitted sync amount=${amount.toString()} dest=${dest.toString()} tx=${txHash}`;
 };
 
 export const initWorkflow = (config: Config) => {
   const cron = new CronCapability();
-
   return [
-    handler(
-      cron.trigger(
-        { schedule: config.schedule }
-      ),
-      onCronTrigger
-    ),
+    handler(cron.trigger({ schedule: config.schedule }), onCronTrigger),
   ];
 };
 
 export async function main() {
-  const runner = await Runner.newRunner<Config>();
-  await runner.run(initWorkflow);
+  const runner = await Runner.newRunner<Config>({
+    configParser: (bytes) =>
+      configSchema.parse(JSON.parse(new TextDecoder().decode(bytes))),
+  });
+  await runner.run(async (config) => initWorkflow(config));
 }

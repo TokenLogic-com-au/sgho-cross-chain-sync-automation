@@ -9,7 +9,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "types": []
+    "types": ["bun"]
   },
-  "include": ["main.ts"]
+  "include": ["main.ts", "config.ts", "evm.ts", "main.test.ts"]
 }

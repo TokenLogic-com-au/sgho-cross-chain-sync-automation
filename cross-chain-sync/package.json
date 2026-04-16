@@ -4,13 +4,21 @@
   "main": "dist/main.js",
   "private": true,
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "contracts:build": "cd ../contracts && forge build",
+    "contracts:clean": "rm -rf ../contracts/out ../contracts/cache",
+    "simulate:staging": "cd .. && cre workflow simulate cross-chain-sync --target=staging-settings",
+    "simulate:production": "cd .. && cre workflow simulate cross-chain-sync --target=production-settings"
   },
   "license": "UNLICENSED",
   "dependencies": {
-    "@chainlink/cre-sdk": "^1.5.0"
+    "@chainlink/cre-sdk": "^1.5.0",
+    "viem": "2.34.0",
+    "zod": "3.25.76"
   },
   "devDependencies": {
+    "@types/bun": "1.3.8",
     "typescript": "5.9.3"
   }
 }
