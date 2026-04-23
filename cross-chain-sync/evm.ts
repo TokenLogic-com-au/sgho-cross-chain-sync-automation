@@ -32,8 +32,7 @@ function callFrom(cfg: Config): Address {
   return (cfg.evmCallFrom ?? cfg.consumerAddress) as Address;
 }
 
-/** On-chain gate: `SyncKeeperConsumer.needsUpkeep()` (oracle pool balance vs contract threshold). */
-export function readNeedsUpkeep(runtime: Runtime<Config>, cfg: Config): boolean {
+function resolveEvmNetwork(cfg: Config) {
   const network = getNetwork({
     chainFamily: "evm",
     chainSelectorName: cfg.chainSelectorName,
@@ -42,8 +41,16 @@ export function readNeedsUpkeep(runtime: Runtime<Config>, cfg: Config): boolean 
   if (!network) {
     throw new Error(`Unknown chain: ${cfg.chainSelectorName} (isTestnet=${cfg.isTestnet})`);
   }
+  return network;
+}
 
-  const evmClient = new EVMClient(network.chainSelector.selector);
+function evmClientForConfig(cfg: Config): EVMClient {
+  return new EVMClient(resolveEvmNetwork(cfg).chainSelector.selector);
+}
+
+/** On-chain gate: `SyncKeeperConsumer.needsUpkeep()` (oracle pool balance vs contract threshold). */
+export function readNeedsUpkeep(runtime: Runtime<Config>, cfg: Config): boolean {
+  const evmClient = evmClientForConfig(cfg);
   const data = encodeFunctionData({
     abi: needsUpkeepAbi,
     functionName: "needsUpkeep",
@@ -80,15 +87,6 @@ export function submitSyncReport(
   amount: bigint,
   destChainSelector: bigint
 ): string {
-  const network = getNetwork({
-    chainFamily: "evm",
-    chainSelectorName: cfg.chainSelectorName,
-    isTestnet: cfg.isTestnet,
-  });
-  if (!network) {
-    throw new Error(`Unknown chain: ${cfg.chainSelectorName}`);
-  }
-
   const feeOtoD = cfg.feeOtoD as Hex;
   const reportData = encodeAbiParameters(
     parseAbiParameters("uint64 destChainSelector, uint256 amount, bytes feeOtoD"),
@@ -104,7 +102,7 @@ export function submitSyncReport(
     })
     .result();
 
-  const evmClient = new EVMClient(network.chainSelector.selector);
+  const evmClient = evmClientForConfig(cfg);
   const writeResult = evmClient
     .writeReport(runtime, {
       receiver: cfg.consumerAddress,

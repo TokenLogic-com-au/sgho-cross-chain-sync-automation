@@ -20,14 +20,7 @@ export const onCronTrigger = (runtime: Runtime<Config>): string => {
   }
 
   const amount = BigInt(cfg.syncAmount);
-  if (amount === 0n) {
-    throw new Error("syncAmount must be non-zero when triggering sync");
-  }
-
   const dest = BigInt(cfg.destChainSelector);
-  if (dest > (1n << 64n) - 1n || dest < 0n) {
-    throw new Error("destChainSelector must fit uint64");
-  }
 
   const txHash = submitSyncReport(runtime, cfg, amount, dest);
   runtime.log(`Sync writeReport tx: ${txHash}`);
@@ -43,8 +36,7 @@ export const initWorkflow = (config: Config) => {
 
 export async function main() {
   const runner = await Runner.newRunner<Config>({
-    configParser: (bytes) =>
-      configSchema.parse(JSON.parse(new TextDecoder().decode(bytes))),
+    configSchema,
   });
-  await runner.run(async (config) => initWorkflow(config));
+  await runner.run(initWorkflow);
 }

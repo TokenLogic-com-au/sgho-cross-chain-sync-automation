@@ -1,10 +1,10 @@
 # Cross-chain sync (CRE) — Oracle pool rebalance (keeper pattern)
 
-TypeScript [Chainlink CRE](https://docs.chain.link/cre) workflow on a schedule: it calls **`needsUpkeep()`** on your on-chain consumer (same idea as the [keeper-bot template](https://github.com/smartcontractkit/cre-templates/tree/main/starter-templates/keeper-bot/keeper-bot-ts)). That view reads **`CustomSender`’s oracle pool** and **`TOKEN()`** balance and compares it to an **on-chain threshold**. Only if upkeep is needed does the workflow **`writeReport`**; the consumer’s **`ReceiverTemplate`** path runs **`_processReport`**, which calls **`CustomSender.sync`** with CCIP fee bytes from the report.
+TypeScript [Chainlink CRE](https://docs.chain.link/cre) workflow on a schedule: it calls **`needsUpkeep()`** on your on-chain consumer (same idea as the [keeper-bot template](https://github.com/smartcontractkit/cre-templates/tree/main/starter-templates/keeper-bot/keeper-bot-ts)). That view reads **`CustomSender`’s oracle pool** and **`GHO()`** balance and compares it to an **on-chain threshold**. Only if upkeep is needed does the workflow **`writeReport`**; the consumer’s **`ReceiverTemplate`** path runs **`_processReport`**, which calls **`CustomSender.sync`** with CCIP fee bytes from the report.
 
 **Solidity (`../contracts/`)**
 
-- [`../contracts/src/interfaces/ICustomSender.sol`](../contracts/src/interfaces/ICustomSender.sol) — `getOraclePool()`, `TOKEN()`, `sync(uint64,uint256,bytes)`.
+- [`../contracts/src/interfaces/ICustomSender.sol`](../contracts/src/interfaces/ICustomSender.sol) — `getOraclePool()`, `GHO()`, `sync(uint64,uint256,bytes)`.
 - [`../contracts/src/ReceiverTemplate.sol`](../contracts/src/ReceiverTemplate.sol) — vendored from [Chainlink CRE templates](https://github.com/smartcontractkit/cre-templates/blob/main/starter-templates/keeper-bot/keeper-bot-ts/contracts/evm/src/ReceiverTemplate.sol) (Keystone forwarder + optional workflow checks).
 - [`../contracts/src/SyncKeeperConsumer.sol`](../contracts/src/SyncKeeperConsumer.sol) — extends `ReceiverTemplate`: `needsUpkeep()`, `setMinOraclePoolBalance`, `_processReport` → `sync`.
 
@@ -78,7 +78,7 @@ Validated by [`config.ts`](config.ts). All addresses are checksummed `0x` + 40 h
 
 **On-chain (not in this JSON)** — set at deploy / via owner on `SyncKeeperConsumer`:
 
-- **`minOraclePoolBalance`** — `IERC20(CustomSender.TOKEN()).balanceOf(CustomSender.getOraclePool()) < minOraclePoolBalance` ⇒ `needsUpkeep() == true`. Update with `setMinOraclePoolBalance` (owner).
+- **`minOraclePoolBalance`** — `IERC20(CustomSender.GHO()).balanceOf(CustomSender.getOraclePool()) < minOraclePoolBalance` ⇒ `needsUpkeep() == true`. Update with `setMinOraclePoolBalance` (owner).
 
 ### `project.yaml` (repo root)
 
@@ -268,10 +268,10 @@ If the CLI flags differ slightly for your CRE version, run `cre workflow simulat
 ## Workflow behavior (summary)
 
 1. **Cron** fires per `schedule`.
-2. **Read** `needsUpkeep()` on `SyncKeeperConsumer` via `EVMClient.callContract` (same condition as `_processReport`: pool token balance vs on-chain `minOraclePoolBalance`).
+2. **Read** `needsUpkeep()` on `SyncKeeperConsumer` via `EVMClient.callContract` (oracle pool and GHO token configured on `CustomSender`, and pool token balance below on-chain `minOraclePoolBalance`).
 3. If `needsUpkeep` is **false** → log and return (no write).
 4. Else **encode** report `(uint64 destChainSelector, uint256 amount, bytes feeOtoD)`, **`runtime.report`**, then **`writeReport`** to `consumerAddress`.
-5. On-chain, **`ReceiverTemplate.onReport`** validates the Keystone forwarder (and optional workflow metadata if configured), then **`SyncKeeperConsumer._processReport`** re-checks upkeep, decodes the report, and calls **`CustomSender.sync`** with native fee.
+5. On-chain, **`ReceiverTemplate.onReport`** validates the Keystone forwarder (and optional workflow metadata if configured), then **`SyncKeeperConsumer._processReport`** re-checks the same conditions: if oracle addresses are missing or balance is not below the threshold it **emits** `SyncSkippedOracleMisconfigured` or `SyncSkippedUpkeepNotNeeded` and **returns** without reverting; otherwise it decodes the report and calls **`CustomSender.sync`** with native fee.
 
 ---
 
@@ -281,7 +281,7 @@ If the CLI flags differ slightly for your CRE version, run `cre workflow simulat
 |---------|-------------------|
 | `Network not found` | `chainSelectorName` + `isTestnet` vs [`getNetwork`](https://docs.chain.link/cre/reference/sdk/core-ts) data. |
 | `writeReport` reverts | Receiver not `IReceiver` / wrong forwarder / insufficient gas / consumer not granted `SYNC_ROLE` / wrong `feeOtoD` encoding vs `CustomSender`. |
-| `callContract` reverts | `evmCallFrom` / RPC / wrong `consumerAddress` / `CustomSender` missing `getOraclePool` or `TOKEN`. |
+| `callContract` reverts | `evmCallFrom` / RPC / wrong `consumerAddress` / `CustomSender` missing `getOraclePool` or `GHO`. |
 | Simulation can’t find project | Run `cre` from directory containing **`project.yaml`**. |
 | Tests fail on `bytes` mocks | Use **base64** for `CallContractReply.data` in mocks (see tests). |
 
