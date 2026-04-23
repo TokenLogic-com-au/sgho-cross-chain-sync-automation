@@ -5,7 +5,7 @@ pragma solidity ^0.8.20;
 interface ICustomSender {
     function getOraclePool() external view returns (address);
 
-    function TOKEN() external view returns (address);
+    function GHO() external view returns (address);
 
     function sync(uint64 destChainSelector, uint256 amount, bytes calldata feeOtoD)
         external

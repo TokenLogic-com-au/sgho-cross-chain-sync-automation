@@ -16,17 +16,21 @@ contract SyncKeeperConsumer is ReceiverTemplate {
     error ZeroSyncAmount();
     error FeeOtoDTooShort(uint256 length, uint256 minLength);
     error InsufficientGasLimit(uint32 gasLimit, uint32 minGas);
-    error UpkeepNotNeeded();
 
     address public immutable customSender;
     uint256 public minOraclePoolBalance;
 
     event MinOraclePoolBalanceUpdated(uint256 previous, uint256 current);
+    event SyncSkippedOracleMisconfigured();
+    event SyncSkippedUpkeepNotNeeded(uint256 poolBalance, uint256 minOraclePoolBalance);
 
     constructor(address forwarder, address customSender_, uint256 minOraclePoolBalance_)
         ReceiverTemplate(forwarder)
     {
         if (customSender_ == address(0)) revert ZeroAddress();
+        address pool = ICustomSender(customSender_).getOraclePool();
+        address token = ICustomSender(customSender_).GHO();
+        if (pool == address(0) || token == address(0)) revert ZeroAddress();
         customSender = customSender_;
         minOraclePoolBalance = minOraclePoolBalance_;
     }
@@ -36,21 +40,39 @@ contract SyncKeeperConsumer is ReceiverTemplate {
         minOraclePoolBalance = minBal;
     }
 
-    function _needsUpkeep() internal view returns (bool) {
+    /// @dev Returns false if oracle pool or GHO token address is unset on `CustomSender`.
+    function _oracleEnvValid() internal view returns (bool) {
         address pool = ICustomSender(customSender).getOraclePool();
-        address token = ICustomSender(customSender).TOKEN();
-        if (pool == address(0) || token == address(0)) return false;
-        uint256 bal = IERC20(token).balanceOf(pool);
-        return bal < minOraclePoolBalance;
+        address token = ICustomSender(customSender).GHO();
+        return pool != address(0) && token != address(0);
     }
 
-    /// @notice View used by the CRE workflow (same condition as enforced in `_processReport`).
+    function _oraclePoolTokenBalance() private view returns (uint256) {
+        address pool = ICustomSender(customSender).getOraclePool();
+        address token = ICustomSender(customSender).GHO();
+        return IERC20(token).balanceOf(pool);
+    }
+
+    /// @dev True when oracle pool token balance is strictly below `minOraclePoolBalance`. Preconditions: `_oracleEnvValid()`.
+    function _needsUpkeep() internal view returns (bool) {
+        return _oraclePoolTokenBalance() < minOraclePoolBalance;
+    }
+
+    /// @notice View used by the CRE workflow (oracle configured and pool balance below threshold).
     function needsUpkeep() external view returns (bool upkeepNeeded) {
+        if (!_oracleEnvValid()) return false;
         upkeepNeeded = _needsUpkeep();
     }
 
     function _processReport(bytes calldata report) internal override {
-        if (!_needsUpkeep()) revert UpkeepNotNeeded();
+        if (!_oracleEnvValid()) {
+            emit SyncSkippedOracleMisconfigured();
+            return;
+        }
+        if (!_needsUpkeep()) {
+            emit SyncSkippedUpkeepNotNeeded(_oraclePoolTokenBalance(), minOraclePoolBalance);
+            return;
+        }
 
         (uint64 destChainSelector, uint256 amount, bytes memory feeOtoD) =
             abi.decode(report, (uint64, uint256, bytes));
