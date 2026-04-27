@@ -1,5 +1,7 @@
 # Cross-chain sync (CRE) — Oracle pool rebalance (keeper pattern)
 
+> **DISCLAIMER:** This code represents an example of using a Chainlink product or service and is provided to help you understand how to interact with Chainlink's systems and services so that you can integrate them into your own. This code is provided "AS IS" and "AS AVAILABLE" without warranties of any kind, has not been audited, and may be missing key checks or error handling to make the usage of the product more clear. Do not use the code in this example in a production environment without completing your own audits and application of best practices. Neither Chainlink Labs, the Chainlink Foundation, nor Chainlink node operators are responsible for unintended outputs that are generated due to errors in code.
+
 TypeScript [Chainlink CRE](https://docs.chain.link/cre) workflow on a schedule: it calls **`needsUpkeep()`** on your on-chain consumer (same idea as the [keeper-bot template](https://github.com/smartcontractkit/cre-templates/tree/main/starter-templates/keeper-bot/keeper-bot-ts)). That view reads **`CustomSender`’s oracle pool** and **`GHO()`** balance and compares it to an **on-chain threshold**. Only if upkeep is needed does the workflow **`writeReport`**; the consumer’s **`ReceiverTemplate`** path runs **`_processReport`**, which calls **`CustomSender.sync`** with CCIP fee bytes from the report.
 
 **Solidity (`../contracts/`)**
