@@ -76,7 +76,7 @@ contract SyncKeeperConsumer is ReceiverTemplate {
         s_feeOtoD = newFee;
     }
 
-    /// @dev Reverts if `fee` is shorter than one ABI word for `(uint128 maxFee, bool payInGho, uint32 gasLimit)` or gas limit is below `MIN_PROCESS_MESSAGE_GAS`.
+    /// @dev Reverts if `fee` is shorter than one ABI word for `(uint128 maxFeeOtoD, bool payInGhoOtoD, uint32 gasLimitOtoD)` or gas limit is below `MIN_PROCESS_MESSAGE_GAS`.
     function _decodeAndValidateFeeOtoD(bytes memory fee)
         private
         pure
