@@ -78,7 +78,8 @@ Validated by [`config.ts`](config.ts). All addresses are checksummed `0x` + 40 h
 **On-chain (not in this JSON)** — set at deploy / via owner on `SyncKeeperConsumer`:
 
 - **`minOraclePoolBalance`** — `IERC20(CustomSender.GHO()).balanceOf(CustomSender.getOraclePool()) < minOraclePoolBalance` ⇒ `needsUpkeep() == true`. Update with `setMinOraclePoolBalance` (owner).
-- **`destChainSelector`**, **`syncAmount`** — immutables set in the constructor (CCIP destination and `sync` amount).
+- **`destChainSelector`** — immutable set in the constructor (CCIP destination chain).
+- **`syncAmount`** — initial value in the constructor; update with `setSyncAmount` (owner, non-zero).
 - **`feeOtoD`** — CCIP fee blob (`bytes`), set in the constructor; update with `setFeeOtoD` (owner) when fee caps or gas limits need to change.
 
 ### `project.yaml` (repo root)
@@ -196,6 +197,14 @@ To change the threshold later (owner):
 
 ```bash
 cast send "$CONSUMER_ADDRESS" "setMinOraclePoolBalance(uint256)" "$NEW_MIN_BALANCE_WEI" \
+  --rpc-url "$SEPOLIA_RPC_URL" \
+  --private-key "$OWNER_PRIVATE_KEY"
+```
+
+To change the sync amount later (owner, must be non-zero):
+
+```bash
+cast send "$CONSUMER_ADDRESS" "setSyncAmount(uint256)" "$SYNC_AMOUNT_WEI" \
   --rpc-url "$SEPOLIA_RPC_URL" \
   --private-key "$OWNER_PRIVATE_KEY"
 ```

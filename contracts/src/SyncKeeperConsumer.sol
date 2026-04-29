@@ -8,8 +8,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 /// @title SyncKeeperConsumer
 /// @notice CRE keeper pattern: `needsUpkeep()` reads oracle-pool token balance from `CustomSender`;
 ///         `_processReport` uses on-chain sync params and calls `ICustomSender.sync` (grant `SYNC_ROLE` here).
-/// @dev Vendored `ReceiverTemplate` from Chainlink CRE templates. Threshold, dest, amount, and fee blob are on-chain;
-///      the CRE report body is ignored (minimal payload from the workflow).
+/// @dev Vendored `ReceiverTemplate` from Chainlink CRE templates. Threshold, dest chain, sync amount, and fee blob are on-chain;
+///      `destChainSelector` is immutable; `syncAmount` and `feeOtoD` are owner-updatable. The CRE report body is ignored (minimal payload from the workflow).
 contract SyncKeeperConsumer is ReceiverTemplate {
     uint32 public constant MIN_PROCESS_MESSAGE_GAS = 75_000;
 
@@ -22,11 +22,12 @@ contract SyncKeeperConsumer is ReceiverTemplate {
     uint256 public minOraclePoolBalance;
 
     uint64 public immutable destChainSelector;
-    uint256 public immutable syncAmount;
+    uint256 public syncAmount;
 
     bytes private s_feeOtoD;
 
     event MinOraclePoolBalanceUpdated(uint256 previous, uint256 current);
+    event SyncAmountUpdated(uint256 previous, uint256 current);
     event FeeOtoDUpdated(uint128 indexed maxFeeOtoD, bool indexed payInLinkOtoD, uint32 indexed gasLimitOtoD);
     event SyncSkippedOracleMisconfigured();
     event SyncSkippedUpkeepNotNeeded(uint256 poolBalance, uint256 minOraclePoolBalance);
@@ -62,6 +63,12 @@ contract SyncKeeperConsumer is ReceiverTemplate {
         minOraclePoolBalance = minBal;
     }
 
+    function setSyncAmount(uint256 newAmount) external onlyOwner {
+        if (newAmount == 0) revert ZeroSyncAmount();
+        emit SyncAmountUpdated(syncAmount, newAmount);
+        syncAmount = newAmount;
+    }
+
     function setFeeOtoD(bytes calldata newFee) external onlyOwner {
         bytes memory feeMem = newFee;
         (uint128 maxFeeOtoD, bool payInLinkOtoD, uint32 gasLimitOtoD) = _decodeAndValidateFeeOtoD(feeMem);
@@ -81,6 +88,7 @@ contract SyncKeeperConsumer is ReceiverTemplate {
             revert InsufficientGasLimit(gasLimitOtoD, MIN_PROCESS_MESSAGE_GAS);
         }
     }
+
     function _oracleEnvValid() internal view returns (bool) {
         address pool = ICustomSender(customSender).getOraclePool();
         address token = ICustomSender(customSender).GHO();
