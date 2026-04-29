@@ -27,7 +27,7 @@ contract SyncKeeperConsumer is ReceiverTemplate {
     bytes private s_feeOtoD;
 
     event MinOraclePoolBalanceUpdated(uint256 previous, uint256 current);
-    event FeeOtoDUpdated(bytes newFeeOtoD);
+    event FeeOtoDUpdated(uint128 indexed maxFeeOtoD, bool indexed payInLinkOtoD, uint32 indexed gasLimitOtoD);
     event SyncSkippedOracleMisconfigured();
     event SyncSkippedUpkeepNotNeeded(uint256 poolBalance, uint256 minOraclePoolBalance);
 
@@ -44,7 +44,7 @@ contract SyncKeeperConsumer is ReceiverTemplate {
         address token = ICustomSender(customSender_).GHO();
         if (pool == address(0) || token == address(0)) revert ZeroAddress();
         if (syncAmount_ == 0) revert ZeroSyncAmount();
-        if (feeOtoD_.length < 96) revert FeeOtoDTooShort(feeOtoD_.length, 96);
+        _decodeAndValidateFeeOtoD(feeOtoD_);
 
         customSender = customSender_;
         minOraclePoolBalance = minOraclePoolBalance_;
@@ -63,12 +63,24 @@ contract SyncKeeperConsumer is ReceiverTemplate {
     }
 
     function setFeeOtoD(bytes calldata newFee) external onlyOwner {
-        if (newFee.length < 96) revert FeeOtoDTooShort(newFee.length, 96);
-        emit FeeOtoDUpdated(newFee);
+        bytes memory feeMem = newFee;
+        (uint128 maxFeeOtoD, bool payInLinkOtoD, uint32 gasLimitOtoD) = _decodeAndValidateFeeOtoD(feeMem);
+        emit FeeOtoDUpdated(maxFeeOtoD, payInLinkOtoD, gasLimitOtoD);
         s_feeOtoD = newFee;
     }
 
-    /// @dev Returns false if oracle pool or GHO token address is unset on `CustomSender`.
+    /// @dev Reverts if `fee` is shorter than one ABI word for `(uint128,bool,uint32)` or gas limit is below `MIN_PROCESS_MESSAGE_GAS`.
+    function _decodeAndValidateFeeOtoD(bytes memory fee)
+        private
+        pure
+        returns (uint128 maxFeeOtoD, bool payInLinkOtoD, uint32 gasLimitOtoD)
+    {
+        if (fee.length < 96) revert FeeOtoDTooShort(fee.length, 96);
+        (maxFeeOtoD, payInLinkOtoD, gasLimitOtoD) = abi.decode(fee, (uint128, bool, uint32));
+        if (gasLimitOtoD < MIN_PROCESS_MESSAGE_GAS) {
+            revert InsufficientGasLimit(gasLimitOtoD, MIN_PROCESS_MESSAGE_GAS);
+        }
+    }
     function _oracleEnvValid() internal view returns (bool) {
         address pool = ICustomSender(customSender).getOraclePool();
         address token = ICustomSender(customSender).GHO();
@@ -103,13 +115,7 @@ contract SyncKeeperConsumer is ReceiverTemplate {
         }
 
         bytes memory feeMem = s_feeOtoD;
-        if (feeMem.length < 96) revert FeeOtoDTooShort(feeMem.length, 96);
-
-        (uint128 maxFeeOtoD, bool payInLinkOtoD, uint32 gasLimitOtoD) =
-            abi.decode(feeMem, (uint128, bool, uint32));
-        if (gasLimitOtoD < MIN_PROCESS_MESSAGE_GAS) {
-            revert InsufficientGasLimit(gasLimitOtoD, MIN_PROCESS_MESSAGE_GAS);
-        }
+        (uint128 maxFeeOtoD, bool payInLinkOtoD,) = _decodeAndValidateFeeOtoD(feeMem);
 
         uint256 nativeAmount = payInLinkOtoD ? 0 : uint256(maxFeeOtoD);
 
