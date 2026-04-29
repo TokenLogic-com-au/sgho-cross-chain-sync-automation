@@ -9,7 +9,6 @@ import {
 } from "@chainlink/cre-sdk";
 import {
   decodeAbiParameters,
-  encodeAbiParameters,
   encodeFunctionData,
   parseAbiParameters,
   toHex,
@@ -81,21 +80,13 @@ export function readNeedsUpkeep(runtime: Runtime<Config>, cfg: Config): boolean 
   return upkeepNeeded;
 }
 
-export function submitSyncReport(
-  runtime: Runtime<Config>,
-  cfg: Config,
-  amount: bigint,
-  destChainSelector: bigint
-): string {
-  const feeOtoD = cfg.feeOtoD as Hex;
-  const reportData = encodeAbiParameters(
-    parseAbiParameters("uint64 destChainSelector, uint256 amount, bytes feeOtoD"),
-    [destChainSelector, amount, feeOtoD]
-  );
+/** Report body is unused on-chain; `SyncKeeperConsumer` reads dest, amount, and fee from storage/immutables. */
+const EMPTY_REPORT = "0x" as Hex;
 
+export function submitSyncReport(runtime: Runtime<Config>, cfg: Config): string {
   const report = runtime
     .report({
-      encodedPayload: hexToBase64(reportData),
+      encodedPayload: hexToBase64(EMPTY_REPORT),
       encoderName: "evm",
       signingAlgo: "ecdsa",
       hashingAlgo: "keccak256",

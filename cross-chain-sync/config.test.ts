@@ -1,11 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { encodeAbiParameters, parseAbiParameters } from "viem";
 import { configSchema } from "./config";
-
-const feeOtoD = encodeAbiParameters(
-  parseAbiParameters("uint128, bool, uint32"),
-  [100000000000000000n, false, 400_000]
-) as `0x${string}`;
 
 describe("configSchema", () => {
   const base = {
@@ -14,53 +8,36 @@ describe("configSchema", () => {
     isTestnet: true,
     consumerAddress: "0x1111111111111111111111111111111111111111",
     gasLimit: "500000",
-    destChainSelector: "5009297550715157269",
-    syncAmount: "1",
-    feeOtoD,
   } as const;
 
-  test("accepts boundary uint64 max", () => {
-    const max = (1n << 64n) - 1n;
+  test("accepts minimal valid config", () => {
+    const parsed = configSchema.parse(base);
+    expect(parsed.consumerAddress).toBe(base.consumerAddress);
+    expect(parsed.gasLimit).toBe("500000");
+  });
+
+  test("accepts optional evmCallFrom", () => {
     const parsed = configSchema.parse({
       ...base,
-      destChainSelector: max.toString(),
-      syncAmount: "42",
+      evmCallFrom: "0x2222222222222222222222222222222222222222",
     });
-    expect(parsed.destChainSelector).toBe(max.toString());
+    expect(parsed.evmCallFrom).toBe("0x2222222222222222222222222222222222222222");
   });
 
-  test("accepts uint64 zero dest", () => {
-    const parsed = configSchema.parse({
-      ...base,
-      destChainSelector: "0",
-    });
-    expect(parsed.destChainSelector).toBe("0");
-  });
-
-  test("rejects dest above uint64", () => {
-    const tooBig = (1n << 64n).toString();
+  test("rejects invalid consumer address", () => {
     expect(() =>
       configSchema.parse({
         ...base,
-        destChainSelector: tooBig,
+        consumerAddress: "0x123",
       })
-    ).toThrow(/uint64/i);
+    ).toThrow();
   });
 
-  test("rejects zero syncAmount", () => {
+  test("rejects non-numeric gasLimit", () => {
     expect(() =>
       configSchema.parse({
         ...base,
-        syncAmount: "0",
-      })
-    ).toThrow(/non-zero/i);
-  });
-
-  test("rejects non-decimal destChainSelector", () => {
-    expect(() =>
-      configSchema.parse({
-        ...base,
-        destChainSelector: "12a",
+        gasLimit: "abc",
       })
     ).toThrow();
   });

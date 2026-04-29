@@ -7,8 +7,9 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @title SyncKeeperConsumer
 /// @notice CRE keeper pattern: `needsUpkeep()` reads oracle-pool token balance from `CustomSender`;
-///         `_processReport` decodes sync args and calls `ICustomSender.sync` (grant `SYNC_ROLE` here).
-/// @dev Vendored `ReceiverTemplate` from Chainlink CRE templates. Threshold is on-chain; fee/amount/dest stay in the report.
+///         `_processReport` uses on-chain sync params and calls `ICustomSender.sync` (grant `SYNC_ROLE` here).
+/// @dev Vendored `ReceiverTemplate` from Chainlink CRE templates. Threshold, dest, amount, and fee blob are on-chain;
+///      the CRE report body is ignored (minimal payload from the workflow).
 contract SyncKeeperConsumer is ReceiverTemplate {
     uint32 public constant MIN_PROCESS_MESSAGE_GAS = 75_000;
 
@@ -20,24 +21,51 @@ contract SyncKeeperConsumer is ReceiverTemplate {
     address public immutable customSender;
     uint256 public minOraclePoolBalance;
 
+    uint64 public immutable destChainSelector;
+    uint256 public immutable syncAmount;
+
+    bytes private s_feeOtoD;
+
     event MinOraclePoolBalanceUpdated(uint256 previous, uint256 current);
+    event FeeOtoDUpdated(bytes newFeeOtoD);
     event SyncSkippedOracleMisconfigured();
     event SyncSkippedUpkeepNotNeeded(uint256 poolBalance, uint256 minOraclePoolBalance);
 
-    constructor(address forwarder, address customSender_, uint256 minOraclePoolBalance_)
-        ReceiverTemplate(forwarder)
-    {
+    constructor(
+        address forwarder,
+        address customSender_,
+        uint256 minOraclePoolBalance_,
+        uint64 destChainSelector_,
+        uint256 syncAmount_,
+        bytes memory feeOtoD_
+    ) ReceiverTemplate(forwarder) {
         if (customSender_ == address(0)) revert ZeroAddress();
         address pool = ICustomSender(customSender_).getOraclePool();
         address token = ICustomSender(customSender_).GHO();
         if (pool == address(0) || token == address(0)) revert ZeroAddress();
+        if (syncAmount_ == 0) revert ZeroSyncAmount();
+        if (feeOtoD_.length < 96) revert FeeOtoDTooShort(feeOtoD_.length, 96);
+
         customSender = customSender_;
         minOraclePoolBalance = minOraclePoolBalance_;
+        destChainSelector = destChainSelector_;
+        syncAmount = syncAmount_;
+        s_feeOtoD = feeOtoD_;
+    }
+
+    function feeOtoD() external view returns (bytes memory) {
+        return s_feeOtoD;
     }
 
     function setMinOraclePoolBalance(uint256 minBal) external onlyOwner {
         emit MinOraclePoolBalanceUpdated(minOraclePoolBalance, minBal);
         minOraclePoolBalance = minBal;
+    }
+
+    function setFeeOtoD(bytes calldata newFee) external onlyOwner {
+        if (newFee.length < 96) revert FeeOtoDTooShort(newFee.length, 96);
+        emit FeeOtoDUpdated(newFee);
+        s_feeOtoD = newFee;
     }
 
     /// @dev Returns false if oracle pool or GHO token address is unset on `CustomSender`.
@@ -64,7 +92,7 @@ contract SyncKeeperConsumer is ReceiverTemplate {
         upkeepNeeded = _needsUpkeep();
     }
 
-    function _processReport(bytes calldata report) internal override {
+    function _processReport(bytes calldata /* report */) internal override {
         if (!_oracleEnvValid()) {
             emit SyncSkippedOracleMisconfigured();
             return;
@@ -74,21 +102,18 @@ contract SyncKeeperConsumer is ReceiverTemplate {
             return;
         }
 
-        (uint64 destChainSelector, uint256 amount, bytes memory feeOtoD) =
-            abi.decode(report, (uint64, uint256, bytes));
-
-        if (amount == 0) revert ZeroSyncAmount();
-        if (feeOtoD.length < 96) revert FeeOtoDTooShort(feeOtoD.length, 96);
+        bytes memory feeMem = s_feeOtoD;
+        if (feeMem.length < 96) revert FeeOtoDTooShort(feeMem.length, 96);
 
         (uint128 maxFeeOtoD, bool payInLinkOtoD, uint32 gasLimitOtoD) =
-            abi.decode(feeOtoD, (uint128, bool, uint32));
+            abi.decode(feeMem, (uint128, bool, uint32));
         if (gasLimitOtoD < MIN_PROCESS_MESSAGE_GAS) {
             revert InsufficientGasLimit(gasLimitOtoD, MIN_PROCESS_MESSAGE_GAS);
         }
 
         uint256 nativeAmount = payInLinkOtoD ? 0 : uint256(maxFeeOtoD);
 
-        ICustomSender(customSender).sync{value: nativeAmount}(destChainSelector, amount, feeOtoD);
+        ICustomSender(customSender).sync{value: nativeAmount}(destChainSelector, syncAmount, feeMem);
     }
 
     receive() external payable {}

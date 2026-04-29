@@ -8,12 +8,7 @@ import { initWorkflow, onCronTrigger } from "./main";
 /** ethereum-testnet-sepolia — same as EVMClient.SUPPORTED_CHAIN_SELECTORS */
 const CHAIN_SELECTOR = 16015286601757825753n;
 
-const feeOtoD = encodeAbiParameters(
-  parseAbiParameters("uint128, bool, uint32"),
-  [100000000000000000n, false, 400_000]
-) as `0x${string}`;
-
-/** Bufbuild `fromJson` for protobuf `bytes` expects base64, not `0x` hex (see EvmMock path). */
+/** Bufbuild `fromJson` for protobuf `bytes` fields expects base64, not `0x` hex (see EvmMock path). */
 function callContractReturnBool(value: boolean): { data: string } {
   const hex = encodeAbiParameters(parseAbiParameters("bool"), [value]);
   return { data: Buffer.from(hex.slice(2), "hex").toString("base64") };
@@ -26,9 +21,6 @@ function baseConfig(over: Partial<Config> = {}): Config {
     isTestnet: true,
     consumerAddress: "0x1111111111111111111111111111111111111111",
     gasLimit: "500000",
-    destChainSelector: "5009297550715157269",
-    syncAmount: "1",
-    feeOtoD,
     ...over,
   };
 }
@@ -70,7 +62,7 @@ describe("onCronTrigger", () => {
       }) as unknown as ReturnType<NonNullable<(typeof evmMock)["writeReport"]>>;
 
     const runtime = newTestRuntime();
-    runtime.config = baseConfig({ syncAmount: "42" });
+    runtime.config = baseConfig();
 
     const out = onCronTrigger(runtime as Runtime<Config>);
     expect(out).toContain("Submitted sync");

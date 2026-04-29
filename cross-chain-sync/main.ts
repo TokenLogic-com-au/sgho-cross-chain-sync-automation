@@ -19,12 +19,9 @@ export const onCronTrigger = (runtime: Runtime<Config>): string => {
     return "Skip sync: needsUpkeep is false (oracle pool balance >= on-chain threshold)";
   }
 
-  const amount = BigInt(cfg.syncAmount);
-  const dest = BigInt(cfg.destChainSelector);
-
-  const txHash = submitSyncReport(runtime, cfg, amount, dest);
+  const txHash = submitSyncReport(runtime, cfg);
   runtime.log(`Sync writeReport tx: ${txHash}`);
-  return `Submitted sync amount=${amount.toString()} dest=${dest.toString()} tx=${txHash}`;
+  return `Submitted sync tx=${txHash}`;
 };
 
 export const initWorkflow = (config: Config) => {
