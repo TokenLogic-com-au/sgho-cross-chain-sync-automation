@@ -2,7 +2,7 @@
 
 > **DISCLAIMER:** This code represents an example of using a Chainlink product or service and is provided to help you understand how to interact with Chainlink's systems and services so that you can integrate them into your own. This code is provided "AS IS" and "AS AVAILABLE" without warranties of any kind, has not been audited, and may be missing key checks or error handling to make the usage of the product more clear. Do not use the code in this example in a production environment without completing your own audits and application of best practices. Neither Chainlink Labs, the Chainlink Foundation, nor Chainlink node operators are responsible for unintended outputs that are generated due to errors in code.
 
-TypeScript [Chainlink CRE](https://docs.chain.link/cre) workflow on a schedule: it calls **`needsUpkeep()`** on your on-chain consumer (same idea as the [keeper-bot template](https://github.com/smartcontractkit/cre-templates/tree/main/starter-templates/keeper-bot/keeper-bot-ts)). That view reads **`CustomSender`’s oracle pool** and **`GHO()`** balance and compares it to an **on-chain threshold**. Only if upkeep is needed does the workflow **`writeReport`**; the consumer’s **`ReceiverTemplate`** path runs **`_processReport`**, which calls **`CustomSender.sync`** with CCIP fee bytes from the report.
+TypeScript [Chainlink CRE](https://docs.chain.link/cre) workflow on a schedule: it calls **`needsUpkeep()`** on your on-chain consumer (same idea as the [keeper-bot template](https://github.com/smartcontractkit/cre-templates/tree/main/starter-templates/keeper-bot/keeper-bot-ts)). That view reads **`CustomSender`’s oracle pool** and **`GHO()`** balance and compares it to an **on-chain threshold**. Only if upkeep is needed does the workflow **`writeReport`**; the consumer’s **`ReceiverTemplate`** path runs **`_processReport`**, which calls **`CustomSender.sync`** using **dest chain selector, sync amount, and CCIP fee bytes** stored on the consumer (the CRE report body is empty / ignored).
 
 **Solidity (`../contracts/`)**
 
@@ -14,7 +14,7 @@ TypeScript [Chainlink CRE](https://docs.chain.link/cre) workflow on a schedule: 
 
 - [`main.ts`](main.ts) — cron → `needsUpkeep` read → optional `writeReport`.
 - [`evm.ts`](evm.ts) — `callContract` (`needsUpkeep`) and `writeReport` helpers.
-- [`config.ts`](config.ts) — Zod schema (threshold is **not** in JSON; it lives on the consumer).
+- [`config.ts`](config.ts) — Zod schema (threshold, CCIP dest, amount, and `feeOtoD` are **not** in JSON; they live on the consumer).
 
 **Further reading**
 
@@ -73,14 +73,14 @@ Validated by [`config.ts`](config.ts). All addresses are checksummed `0x` + 40 h
 | `isTestnet` | Passed to `getNetwork()` (must match the chain you use). |
 | `consumerAddress` | Deployed **`SyncKeeperConsumer`** (IReceiver); target of `writeReport` and of `needsUpkeep` reads. |
 | `gasLimit` | Gas limit string for `writeReport`, e.g. `"750000"`. |
-| `destChainSelector` | Decimal string `uint64` CCIP destination chain selector for `sync`. |
-| `syncAmount` | Decimal string `uint256` passed as `amount` to `sync`. |
-| `feeOtoD` | `0x`-hex ABI blob (e.g. from your `FeeCodec.encodeCCIP(maxFee, payInLink, gasLimit)`). |
 | `evmCallFrom` | Optional; `from` address for **read** `callContract`. Defaults to `consumerAddress`. |
 
 **On-chain (not in this JSON)** — set at deploy / via owner on `SyncKeeperConsumer`:
 
 - **`minOraclePoolBalance`** — `IERC20(CustomSender.GHO()).balanceOf(CustomSender.getOraclePool()) < minOraclePoolBalance` ⇒ `needsUpkeep() == true`. Update with `setMinOraclePoolBalance` (owner).
+- **`destChainSelector`** — immutable set in the constructor (CCIP destination chain).
+- **`syncAmount`** — initial value in the constructor; update with `setSyncAmount` (owner, non-zero).
+- **`feeOtoD`** — CCIP fee blob (`bytes`), set in the constructor; update with `setFeeOtoD` (owner) when fee caps or gas limits need to change.
 
 ### `project.yaml` (repo root)
 
@@ -155,6 +155,9 @@ export PRIVATE_KEY="0x..."                                             # deploye
 export KEYSTONE_FORWARDER="0x..."                                    # from Forwarder Directory for your chain
 export CUSTOM_SENDER="0x..."                                         # your CustomSender proxy/impl address
 export MIN_ORACLE_POOL_BALANCE_WEI="1000000000000000000000"          # initial on-chain threshold (wei, decimal string)
+export DEST_CHAIN_SELECTOR="5009297550715157269"                    # uint64 CCIP dest selector (decimal string for cast)
+export SYNC_AMOUNT_WEI="1000000000000000000"                        # amount passed to sync (wei)
+export FEE_OTOD="0x000000000000000000000000000000000000000000000000016345785d8a000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000061a80"  # abi.encode(uint128,bool,uint32) — min 96 bytes
 ```
 
 Never commit real keys. Prefer a hardware wallet or CI secret store for production.
@@ -169,7 +172,7 @@ forge install OpenZeppelin/openzeppelin-contracts@v5.0.2 --no-git
 
 ### 3. Deploy `SyncKeeperConsumer`
 
-Constructor: `(address forwarder, address customSender, uint256 minOraclePoolBalance)`.
+Constructor: `(address forwarder, address customSender, uint256 minOraclePoolBalance, uint64 destChainSelector, uint256 syncAmount, bytes feeOtoD)`.
 
 **`forge create`**
 
@@ -179,7 +182,13 @@ cd ../contracts
 forge create src/SyncKeeperConsumer.sol:SyncKeeperConsumer \
   --rpc-url "$SEPOLIA_RPC_URL" \
   --private-key "$PRIVATE_KEY" \
-  --constructor-args "$KEYSTONE_FORWARDER" "$CUSTOM_SENDER" "$MIN_ORACLE_POOL_BALANCE_WEI"
+  --constructor-args \
+    "$KEYSTONE_FORWARDER" \
+    "$CUSTOM_SENDER" \
+    "$MIN_ORACLE_POOL_BALANCE_WEI" \
+    "$DEST_CHAIN_SELECTOR" \
+    "$SYNC_AMOUNT_WEI" \
+    "$FEE_OTOD"
 ```
 
 Save the **deployed contract address** as your workflow **`consumerAddress`**.
@@ -188,6 +197,22 @@ To change the threshold later (owner):
 
 ```bash
 cast send "$CONSUMER_ADDRESS" "setMinOraclePoolBalance(uint256)" "$NEW_MIN_BALANCE_WEI" \
+  --rpc-url "$SEPOLIA_RPC_URL" \
+  --private-key "$OWNER_PRIVATE_KEY"
+```
+
+To change the sync amount later (owner, must be non-zero):
+
+```bash
+cast send "$CONSUMER_ADDRESS" "setSyncAmount(uint256)" "$SYNC_AMOUNT_WEI" \
+  --rpc-url "$SEPOLIA_RPC_URL" \
+  --private-key "$OWNER_PRIVATE_KEY"
+```
+
+To change the encoded CCIP fee blob later (owner):
+
+```bash
+cast send "$CONSUMER_ADDRESS" "setFeeOtoD(bytes)" "$FEE_OTOD" \
   --rpc-url "$SEPOLIA_RPC_URL" \
   --private-key "$OWNER_PRIVATE_KEY"
 ```
@@ -237,7 +262,7 @@ CRE CLI loads `.env` from the working directory where you invoke `cre`.
 ### 2. Align `project.yaml` and config
 
 - `project.yaml` → `rpcs[].chain-name` must match `chainSelectorName` / network in your JSON config.
-- `config.*.json` → real `consumerAddress` (deployed `SyncKeeperConsumer` with correct on-chain `minOraclePoolBalance`), plus `syncAmount` / `feeOtoD` for a dry run.
+- `config.*.json` → real `consumerAddress` (deployed `SyncKeeperConsumer` with correct on-chain `minOraclePoolBalance`, `destChainSelector`, `syncAmount`, and `feeOtoD`).
 
 ### 3. Run simulator
 
@@ -272,8 +297,8 @@ If the CLI flags differ slightly for your CRE version, run `cre workflow simulat
 1. **Cron** fires per `schedule`.
 2. **Read** `needsUpkeep()` on `SyncKeeperConsumer` via `EVMClient.callContract` (oracle pool and GHO token configured on `CustomSender`, and pool token balance below on-chain `minOraclePoolBalance`).
 3. If `needsUpkeep` is **false** → log and return (no write).
-4. Else **encode** report `(uint64 destChainSelector, uint256 amount, bytes feeOtoD)`, **`runtime.report`**, then **`writeReport`** to `consumerAddress`.
-5. On-chain, **`ReceiverTemplate.onReport`** validates the Keystone forwarder (and optional workflow metadata if configured), then **`SyncKeeperConsumer._processReport`** re-checks the same conditions: if oracle addresses are missing or balance is not below the threshold it **emits** `SyncSkippedOracleMisconfigured` or `SyncSkippedUpkeepNotNeeded` and **returns** without reverting; otherwise it decodes the report and calls **`CustomSender.sync`** with native fee.
+4. Else **`runtime.report`** with an **empty** payload, then **`writeReport`** to `consumerAddress`.
+5. On-chain, **`ReceiverTemplate.onReport`** validates the Keystone forwarder (and optional workflow metadata if configured), then **`SyncKeeperConsumer._processReport`** re-checks the same conditions: if oracle addresses are missing or balance is not below the threshold it **emits** `SyncSkippedOracleMisconfigured` or `SyncSkippedUpkeepNotNeeded` and **returns** without reverting; otherwise it uses **on-chain** dest selector, amount, and `feeOtoD` and calls **`CustomSender.sync`** with native fee.
 
 ---
 
@@ -282,7 +307,7 @@ If the CLI flags differ slightly for your CRE version, run `cre workflow simulat
 | Symptom | Things to check |
 |---------|-------------------|
 | `Network not found` | `chainSelectorName` + `isTestnet` vs [`getNetwork`](https://docs.chain.link/cre/reference/sdk/core-ts) data. |
-| `writeReport` reverts | Receiver not `IReceiver` / wrong forwarder / insufficient gas / consumer not granted `SYNC_ROLE` / wrong `feeOtoD` encoding vs `CustomSender`. |
+| `writeReport` reverts | Receiver not `IReceiver` / wrong forwarder / insufficient gas / consumer not granted `SYNC_ROLE` / on-chain `feeOtoD` encoding vs `CustomSender` mismatch. |
 | `callContract` reverts | `evmCallFrom` / RPC / wrong `consumerAddress` / `CustomSender` missing `getOraclePool` or `GHO`. |
 | Simulation can’t find project | Run `cre` from directory containing **`project.yaml`**. |
 | Tests fail on `bytes` mocks | Use **base64** for `CallContractReply.data` in mocks (see tests). |
