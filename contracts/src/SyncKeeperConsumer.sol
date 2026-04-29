@@ -28,7 +28,7 @@ contract SyncKeeperConsumer is ReceiverTemplate {
 
     event MinOraclePoolBalanceUpdated(uint256 previous, uint256 current);
     event SyncAmountUpdated(uint256 previous, uint256 current);
-    event FeeOtoDUpdated(uint128 indexed maxFeeOtoD, bool indexed payInLinkOtoD, uint32 indexed gasLimitOtoD);
+    event FeeOtoDUpdated(uint128 indexed maxFeeOtoD, bool indexed payInGhoOtoD, uint32 indexed gasLimitOtoD);
     event SyncSkippedOracleMisconfigured();
     event SyncSkippedUpkeepNotNeeded(uint256 poolBalance, uint256 minOraclePoolBalance);
 
@@ -71,19 +71,19 @@ contract SyncKeeperConsumer is ReceiverTemplate {
 
     function setFeeOtoD(bytes calldata newFee) external onlyOwner {
         bytes memory feeMem = newFee;
-        (uint128 maxFeeOtoD, bool payInLinkOtoD, uint32 gasLimitOtoD) = _decodeAndValidateFeeOtoD(feeMem);
-        emit FeeOtoDUpdated(maxFeeOtoD, payInLinkOtoD, gasLimitOtoD);
+        (uint128 maxFeeOtoD, bool payInGhoOtoD, uint32 gasLimitOtoD) = _decodeAndValidateFeeOtoD(feeMem);
+        emit FeeOtoDUpdated(maxFeeOtoD, payInGhoOtoD, gasLimitOtoD);
         s_feeOtoD = newFee;
     }
 
-    /// @dev Reverts if `fee` is shorter than one ABI word for `(uint128,bool,uint32)` or gas limit is below `MIN_PROCESS_MESSAGE_GAS`.
+    /// @dev Reverts if `fee` is shorter than one ABI word for `(uint128 maxFee, bool payInGho, uint32 gasLimit)` or gas limit is below `MIN_PROCESS_MESSAGE_GAS`.
     function _decodeAndValidateFeeOtoD(bytes memory fee)
         private
         pure
-        returns (uint128 maxFeeOtoD, bool payInLinkOtoD, uint32 gasLimitOtoD)
+        returns (uint128 maxFeeOtoD, bool payInGhoOtoD, uint32 gasLimitOtoD)
     {
         if (fee.length < 96) revert FeeOtoDTooShort(fee.length, 96);
-        (maxFeeOtoD, payInLinkOtoD, gasLimitOtoD) = abi.decode(fee, (uint128, bool, uint32));
+        (maxFeeOtoD, payInGhoOtoD, gasLimitOtoD) = abi.decode(fee, (uint128, bool, uint32));
         if (gasLimitOtoD < MIN_PROCESS_MESSAGE_GAS) {
             revert InsufficientGasLimit(gasLimitOtoD, MIN_PROCESS_MESSAGE_GAS);
         }
@@ -123,9 +123,9 @@ contract SyncKeeperConsumer is ReceiverTemplate {
         }
 
         bytes memory feeMem = s_feeOtoD;
-        (uint128 maxFeeOtoD, bool payInLinkOtoD,) = _decodeAndValidateFeeOtoD(feeMem);
+        (uint128 maxFeeOtoD, bool payInGhoOtoD,) = _decodeAndValidateFeeOtoD(feeMem);
 
-        uint256 nativeAmount = payInLinkOtoD ? 0 : uint256(maxFeeOtoD);
+        uint256 nativeAmount = payInGhoOtoD ? 0 : uint256(maxFeeOtoD);
 
         ICustomSender(customSender).sync{value: nativeAmount}(destChainSelector, syncAmount, feeMem);
     }
