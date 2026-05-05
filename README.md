@@ -44,5 +44,7 @@ This repository is intended as **integration reference**, not a turnkey producti
 - **`SYNC_ROLE`** — The consumer must be granted whatever role your `CustomSender` requires to call `sync`.
 - **Threshold and CCIP params** — `minOraclePoolBalance`, destination selector, `syncAmount`, and `feeOtoD` are set on-chain (not only in workflow JSON). Align operator runbooks with [`cross-chain-sync/README.md`](cross-chain-sync/README.md).
 
+**Duplicate rebalance (for Aave review):** `needsUpkeep()` stays true while the oracle pool GHO balance is **below** `minOraclePoolBalance`, so each cron tick can submit another `writeReport` / `sync` until that gate clears—often back-to-back if CCIP or settlement is slow. Outcomes also depend on **`CustomSender.sync`** (e.g. full `syncAmount` vs revert when liquidity is tight). We acknowledge this; we **did not** add a time-based cooldown on the consumer because real flows are **unpredictable** and a fixed gate could block legitimate top-ups—operators should tune cron, thresholds, and `syncAmount` instead.
+
 ---
 
