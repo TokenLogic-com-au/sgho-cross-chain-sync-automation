@@ -7,8 +7,13 @@ interface ICustomSender {
 
     function GHO() external view returns (address);
 
-    function sync(uint64 destChainSelector, uint256 amount, bytes calldata feeOtoD)
-        external
-        payable
-        returns (bytes32 messageId);
+    function SGHO() external view returns (address);
+
+    function sync(
+        address token,
+        uint256 amount,
+        uint256 minAmountOut,
+        bytes calldata feeData,
+        bytes calldata extraArgs
+    ) external payable returns (bytes32 messageId);
 }
