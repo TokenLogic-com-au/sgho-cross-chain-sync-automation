@@ -1,0 +1,7 @@
+Additional Use Grant(s): 
+
+Aave Labs may make use of [cre-aave-cross-chain-sync-automation](https://github.com/smartcontractkit/cre-aave-cross-chain-sync-automation/tree/main) (which is available subject to the license here, the “Licensed Work ”) solely for purposes of: 
+
+1. Deploying, running, or adapting the AAVE GHO/sGHO Cross Chain Sync Workflow of the Licensed Work to enable the cross-chain rebalancing of GHO and sGHO token positions of the Aave fast-staking pool on Arbitrum and the sGHO vault on Ethereum mainnet whether by (a) running the Licensor-provided implementation unmodified, (b) creating a modified or derivative version, or (c) developing an independent implementation that conforms to the applicable interface.
+
+For the avoidance of doubt, this Additional Use Grant (a) extends solely to Aave Labs and not to any other person or entity and (b) does not permit production use of the Licensed Work (or any component thereof) to create, operate, or offer a workflow execution, computation, or cross-chain orchestration service that competes with the Chainlink Runtime Environment or any other Chainlink product or service. Please review the [Disclaimer](https://github.com/smartcontractkit/cre-aave-cross-chain-sync-automation/tree/main#disclaimer) and Chainlink [Terms of Service](https://chain.link/terms) for more information.
