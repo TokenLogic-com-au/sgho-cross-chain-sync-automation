@@ -1,51 +1,83 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {ReceiverTemplate} from "./ReceiverTemplate.sol";
-import {ICustomSender} from "./interfaces/ICustomSender.sol";
-import {IAggregatorV3} from "./interfaces/IAggregatorV3.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-/// @title SyncKeeperConsumer
-/// @notice CRE keeper pattern: `needsUpkeep()` reads oracle-pool GHO balance from `CustomSender`;
-///         `_processReport` derives `minAmountOut` from the sGHO/GHO Chainlink feed and calls
-///         `ICustomSender.sync` (grant `SYNC_ROLE` here). Always syncs GHO.
-/// @dev Vendored `ReceiverTemplate` from Chainlink CRE templates. `GHO`/`SGHO`/`customSender` are
-///      immutable (cached from the sender at construction); sync params (`syncAmount`, `feeOtoD`,
-///      `extraArgs`) and feed config (`priceFeed`, `maxPriceStaleness`) are owner-updatable. The
-///      CRE report body is ignored.
-contract SyncKeeperConsumer is ReceiverTemplate {
-    uint32 public constant MIN_PROCESS_MESSAGE_GAS = 75_000;
+import {ReceiverTemplate} from "./ReceiverTemplate.sol";
+import {IAggregatorV3} from "./interfaces/IAggregatorV3.sol";
+import {ICustomSender} from "./interfaces/ICustomSender.sol";
+import {ISyncKeeperConsumer} from "./interfaces/ISyncKeeperConsumer.sol";
 
-    error ZeroAddress();
-    error ZeroSyncAmount();
-    error FeeOtoDTooShort(uint256 length, uint256 minLength);
-    error InsufficientGasLimit(uint32 gasLimit, uint32 minGas);
-    error InvalidPrice(int256 answer);
-    error StalePriceFeed(uint256 updatedAt, uint256 maxStaleness);
+/**
+ * @title SyncKeeperConsumer Contract
+ * @dev The keeper-style consumer that tops up the oracle pool of a `CustomSender` through a
+ * Chainlink CRE workflow.
+ *
+ * The workflow reads {needsUpkeep}, which compares the `GHO` balance of the oracle pool to
+ * {minOraclePoolBalance}. When the pool is short, the workflow submits a signed report, and the
+ * {ReceiverTemplate} validation path calls {_processReport}, which re-checks the gate, derives
+ * `minAmountOut` from the sGHO/GHO exchange rate feed, and calls `CustomSender.sync`. The body of
+ * the report is ignored, as every parameter of the sync is held by this contract.
+ *
+ * This contract must be granted the `SYNC_ROLE` on the `CustomSender`, and must hold enough native
+ * token to cover the CCIP fee whenever the fee is not paid in `GHO`.
+ *
+ * {CUSTOM_SENDER}, {GHO} and {SGHO} are immutable and cached from the `CustomSender` at
+ * construction. The sync parameters ({syncAmount}, {feeOtoD}, {extraArgs}) and the feed
+ * configuration ({priceFeed}, {maxPriceStaleness}) are owner-updatable.
+ */
+contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
+    /// @inheritdoc ISyncKeeperConsumer
+    uint32 public constant override MIN_PROCESS_MESSAGE_GAS = 400_000;
 
-    address public immutable customSender;
-    address public immutable GHO;
-    address public immutable SGHO;
+    /// @inheritdoc ISyncKeeperConsumer
+    address public immutable override CUSTOM_SENDER;
 
-    uint256 public minOraclePoolBalance;
-    uint256 public syncAmount;
+    /// @inheritdoc ISyncKeeperConsumer
+    address public immutable override GHO;
 
-    address public priceFeed;
-    uint256 public maxPriceStaleness;
+    /// @inheritdoc ISyncKeeperConsumer
+    address public immutable override SGHO;
 
-    bytes private s_feeOtoD;
-    bytes private s_extraArgs;
+    /// @inheritdoc ISyncKeeperConsumer
+    uint256 public override minOraclePoolBalance;
 
-    event MinOraclePoolBalanceUpdated(uint256 previous, uint256 current);
-    event SyncAmountUpdated(uint256 previous, uint256 current);
-    event FeeOtoDUpdated(uint128 indexed maxFeeOtoD, bool indexed payInGhoOtoD, uint32 indexed gasLimitOtoD);
-    event ExtraArgsUpdated(bytes extraArgs);
-    event PriceFeedUpdated(address indexed previous, address indexed current);
-    event MaxPriceStalenessUpdated(uint256 previous, uint256 current);
-    event SyncSkippedOracleMisconfigured();
-    event SyncSkippedUpkeepNotNeeded(uint256 poolBalance, uint256 minOraclePoolBalance);
+    /// @inheritdoc ISyncKeeperConsumer
+    uint256 public override syncAmount;
 
+    /// @inheritdoc ISyncKeeperConsumer
+    address public override priceFeed;
+
+    /// @inheritdoc ISyncKeeperConsumer
+    uint256 public override maxPriceStaleness;
+
+    /// @dev The encoded CCIP fee data forwarded to `CustomSender.sync`.
+    bytes private _feeOtoD;
+
+    /// @dev The encoded extra arguments forwarded to the CCIP router.
+    bytes private _extraArgs;
+
+    /**
+     * @dev Sets the immutable values cached from the `CustomSender`, and the initial sync and feed
+     * configuration.
+     *
+     * Requirements:
+     *
+     * - `customSender_` and `priceFeed_` must not be the zero address.
+     * - The oracle pool, `GHO` and `SGHO` of `customSender_` must not be the zero address.
+     * - `syncAmount_` must be greater than 0.
+     * - `feeOtoD_` must be at least 96 bytes long and encode a gas limit of at least
+     *   {MIN_PROCESS_MESSAGE_GAS}.
+     *
+     * @param forwarder The address of the Chainlink Forwarder contract.
+     * @param customSender_ The address of the `CustomSender` contract to sync.
+     * @param priceFeed_ The address of the sGHO/GHO exchange rate feed.
+     * @param maxPriceStaleness_ The maximum age tolerated for the price feed answer, in seconds.
+     * @param minOraclePoolBalance_ The oracle pool balance below which a sync is performed.
+     * @param syncAmount_ The amount of `GHO` sent to the oracle pool on each sync.
+     * @param feeOtoD_ The encoded CCIP fee data.
+     * @param extraArgs_ The encoded extra arguments forwarded to the CCIP router.
+     */
     constructor(
         address forwarder,
         address customSender_,
@@ -56,139 +88,246 @@ contract SyncKeeperConsumer is ReceiverTemplate {
         bytes memory feeOtoD_,
         bytes memory extraArgs_
     ) ReceiverTemplate(forwarder) {
-        if (customSender_ == address(0) || priceFeed_ == address(0)) revert ZeroAddress();
+        require(
+            customSender_ != address(0) && priceFeed_ != address(0),
+            ZeroAddress()
+        );
+
         address pool = ICustomSender(customSender_).getOraclePool();
         address gho = ICustomSender(customSender_).GHO();
         address sgho = ICustomSender(customSender_).SGHO();
-        if (pool == address(0) || gho == address(0) || sgho == address(0)) revert ZeroAddress();
-        if (syncAmount_ == 0) revert ZeroSyncAmount();
+
+        require(
+            pool != address(0) && gho != address(0) && sgho != address(0),
+            ZeroAddress()
+        );
+
+        require(syncAmount_ > 0, ZeroAmount());
+
         _decodeAndValidateFeeOtoD(feeOtoD_);
 
-        customSender = customSender_;
+        CUSTOM_SENDER = customSender_;
         GHO = gho;
         SGHO = sgho;
         priceFeed = priceFeed_;
         maxPriceStaleness = maxPriceStaleness_;
         minOraclePoolBalance = minOraclePoolBalance_;
         syncAmount = syncAmount_;
-        s_feeOtoD = feeOtoD_;
-        s_extraArgs = extraArgs_;
+        _feeOtoD = feeOtoD_;
+        _extraArgs = extraArgs_;
     }
 
-    function feeOtoD() external view returns (bytes memory) {
-        return s_feeOtoD;
-    }
+    /**
+     * @dev Receives the native token used to pay the CCIP fee when it is not paid in `GHO`.
+     */
+    receive() external payable {}
 
-    function extraArgs() external view returns (bytes memory) {
-        return s_extraArgs;
-    }
-
-    function setMinOraclePoolBalance(uint256 minBal) external onlyOwner {
-        emit MinOraclePoolBalanceUpdated(minOraclePoolBalance, minBal);
+    /// @inheritdoc ISyncKeeperConsumer
+    function setMinOraclePoolBalance(
+        uint256 minBal
+    ) external override onlyOwner {
+        require(minBal > 0, ZeroAmount());
         minOraclePoolBalance = minBal;
+
+        emit MinOraclePoolBalanceUpdated(minOraclePoolBalance, minBal);
     }
 
-    function setSyncAmount(uint256 newAmount) external onlyOwner {
-        if (newAmount == 0) revert ZeroSyncAmount();
-        emit SyncAmountUpdated(syncAmount, newAmount);
+    /// @inheritdoc ISyncKeeperConsumer
+    function setSyncAmount(uint256 newAmount) external override onlyOwner {
+        require(newAmount > 0, ZeroAmount());
         syncAmount = newAmount;
+
+        emit SyncAmountUpdated(syncAmount, newAmount);
     }
 
-    function setFeeOtoD(bytes calldata newFee) external onlyOwner {
+    /// @inheritdoc ISyncKeeperConsumer
+    function setFeeOtoD(bytes calldata newFee) external override onlyOwner {
         bytes memory feeMem = newFee;
-        (uint128 maxFeeOtoD, bool payInGhoOtoD, uint32 gasLimitOtoD) = _decodeAndValidateFeeOtoD(feeMem);
+        (
+            uint128 maxFeeOtoD,
+            bool payInGhoOtoD,
+            uint32 gasLimitOtoD
+        ) = _decodeAndValidateFeeOtoD(feeMem);
+
+        _feeOtoD = newFee;
+
         emit FeeOtoDUpdated(maxFeeOtoD, payInGhoOtoD, gasLimitOtoD);
-        s_feeOtoD = newFee;
     }
 
-    function setExtraArgs(bytes calldata newExtraArgs) external onlyOwner {
+    /// @inheritdoc ISyncKeeperConsumer
+    function setExtraArgs(
+        bytes calldata newExtraArgs
+    ) external override onlyOwner {
+        _extraArgs = newExtraArgs;
+
         emit ExtraArgsUpdated(newExtraArgs);
-        s_extraArgs = newExtraArgs;
     }
 
-    function setPriceFeed(address newFeed) external onlyOwner {
+    /// @inheritdoc ISyncKeeperConsumer
+    function setPriceFeed(address newFeed) external override onlyOwner {
         if (newFeed == address(0)) revert ZeroAddress();
-        emit PriceFeedUpdated(priceFeed, newFeed);
         priceFeed = newFeed;
+
+        emit PriceFeedUpdated(priceFeed, newFeed);
     }
 
-    function setMaxPriceStaleness(uint256 newStaleness) external onlyOwner {
-        emit MaxPriceStalenessUpdated(maxPriceStaleness, newStaleness);
+    /// @inheritdoc ISyncKeeperConsumer
+    function setMaxPriceStaleness(
+        uint256 newStaleness
+    ) external override onlyOwner {
         maxPriceStaleness = newStaleness;
+
+        emit MaxPriceStalenessUpdated(maxPriceStaleness, newStaleness);
     }
 
-    /// @dev Reverts if `fee` is shorter than one ABI word for `(uint128 maxFeeOtoD, bool payInGhoOtoD, uint32 gasLimitOtoD)` or gas limit is below `MIN_PROCESS_MESSAGE_GAS`.
-    function _decodeAndValidateFeeOtoD(bytes memory fee)
-        private
-        pure
-        returns (uint128 maxFeeOtoD, bool payInGhoOtoD, uint32 gasLimitOtoD)
-    {
-        if (fee.length < 96) revert FeeOtoDTooShort(fee.length, 96);
-        (maxFeeOtoD, payInGhoOtoD, gasLimitOtoD) = abi.decode(fee, (uint128, bool, uint32));
-        if (gasLimitOtoD < MIN_PROCESS_MESSAGE_GAS) {
-            revert InsufficientGasLimit(gasLimitOtoD, MIN_PROCESS_MESSAGE_GAS);
-        }
+    /// @inheritdoc ISyncKeeperConsumer
+    function feeOtoD() external view override returns (bytes memory) {
+        return _feeOtoD;
     }
 
-    function _oracleEnvValid() internal view returns (bool) {
-        return ICustomSender(customSender).getOraclePool() != address(0);
+    /// @inheritdoc ISyncKeeperConsumer
+    function extraArgs() external view override returns (bytes memory) {
+        return _extraArgs;
     }
 
-    function _oraclePoolTokenBalance() private view returns (uint256) {
-        address pool = ICustomSender(customSender).getOraclePool();
-        return IERC20(GHO).balanceOf(pool);
-    }
-
-    /// @dev True when oracle pool GHO balance is strictly below `minOraclePoolBalance`. Preconditions: `_oracleEnvValid()`.
-    function _needsUpkeep() internal view returns (bool) {
-        return _oraclePoolTokenBalance() < minOraclePoolBalance;
-    }
-
-    /// @notice View used by the CRE workflow (oracle configured and pool balance below threshold).
-    function needsUpkeep() external view returns (bool upkeepNeeded) {
-        if (!_oracleEnvValid()) return false;
+    /// @inheritdoc ISyncKeeperConsumer
+    function needsUpkeep() external view override returns (bool upkeepNeeded) {
+        if (!_validateOracle()) return false;
         upkeepNeeded = _needsUpkeep();
     }
 
-    /// @dev Converts `ghoAmount` to its sGHO-equivalent using the Chainlink sGHO/GHO 4626 exchange-rate feed.
-    ///      Treats the feed answer as GHO assets per 1 sGHO share (scaled by `10**feed.decimals()`):
-    ///      `sGhoOut = ghoAmount * 10**feedDecimals / answer`. Reverts on non-positive answers or
-    ///      when the last update is older than `maxPriceStaleness`.
-    function _computeMinAmountOut(uint256 ghoAmount) private view returns (uint256) {
-        IAggregatorV3 feed = IAggregatorV3(priceFeed);
-        (, int256 answer,, uint256 updatedAt,) = feed.latestRoundData();
-        if (answer <= 0) revert InvalidPrice(answer);
-        if (block.timestamp - updatedAt > maxPriceStaleness) {
-            revert StalePriceFeed(updatedAt, maxPriceStaleness);
-        }
-        return (ghoAmount * (10 ** feed.decimals())) / uint256(answer);
-    }
-
+    /**
+     * @dev Processes a validated report by syncing the oracle pool.
+     * The gate is re-checked here rather than trusted from the report, as the state may have moved
+     * between the workflow read and the execution of the report. When the gate no longer holds, the
+     * call is a no-op that emits the reason instead of reverting, so that the report is not retried.
+     * The body of the report is ignored.
+     *
+     * Emits a {SyncSkippedOracleMisconfigured} or {SyncSkippedUpkeepNotNeeded} event if no sync is
+     * performed.
+     */
     function _processReport(bytes calldata /* report */) internal override {
-        if (!_oracleEnvValid()) {
+        if (!_validateOracle()) {
             emit SyncSkippedOracleMisconfigured();
             return;
         }
+
         if (!_needsUpkeep()) {
-            emit SyncSkippedUpkeepNotNeeded(_oraclePoolTokenBalance(), minOraclePoolBalance);
+            emit SyncSkippedUpkeepNotNeeded(
+                _oraclePoolTokenBalance(),
+                minOraclePoolBalance
+            );
             return;
         }
 
-        bytes memory feeMem = s_feeOtoD;
-        (uint128 maxFeeOtoD, bool payInGhoOtoD,) = _decodeAndValidateFeeOtoD(feeMem);
+        bytes memory feeMem = _feeOtoD;
+        (uint128 maxFeeOtoD, bool payInGhoOtoD, ) = _decodeAndValidateFeeOtoD(
+            feeMem
+        );
 
         uint256 nativeAmount = payInGhoOtoD ? 0 : uint256(maxFeeOtoD);
         uint256 amount = syncAmount;
         uint256 minAmountOut = _computeMinAmountOut(amount);
 
-        ICustomSender(customSender).sync{value: nativeAmount}(
+        ICustomSender(CUSTOM_SENDER).sync{value: nativeAmount}(
             GHO,
             amount,
             minAmountOut,
             feeMem,
-            s_extraArgs
+            _extraArgs
         );
     }
 
-    receive() external payable {}
+    /**
+     * @dev Returns whether the oracle pool is set on the `CustomSender`.
+     * The oracle pool can be unset by the `CustomSender` admin at any time, so it is checked before
+     * every read of the pool balance.
+     *
+     * @return True if the oracle pool is set.
+     */
+    function _validateOracle() internal view returns (bool) {
+        return ICustomSender(CUSTOM_SENDER).getOraclePool() != address(0);
+    }
+
+    /**
+     * @dev Returns whether the oracle pool is funded below {minOraclePoolBalance}.
+     *
+     * Requirements:
+     *
+     * - The oracle pool must be set, as checked by {_validateOracle}.
+     *
+     * @return True if the `GHO` balance of the oracle pool is strictly below
+     * {minOraclePoolBalance}.
+     */
+    function _needsUpkeep() internal view returns (bool) {
+        return _oraclePoolTokenBalance() < minOraclePoolBalance;
+    }
+
+    /**
+     * @dev Decodes and validates the encoded CCIP fee data.
+     *
+     * Requirements:
+     *
+     * - `fee` must be at least 96 bytes long, the length of the three ABI words it decodes to.
+     * - The gas limit encoded in `fee` must be at least {MIN_PROCESS_MESSAGE_GAS}.
+     *
+     * @param fee The encoded CCIP fee data.
+     * @return maxFeeOtoD The maximum CCIP fee allowed for the origin to destination message.
+     * @return payInGhoOtoD Whether the fee is paid in `GHO` (`true`) or in native token (`false`).
+     * @return gasLimitOtoD The gas limit for executing the message on the destination chain.
+     */
+    function _decodeAndValidateFeeOtoD(
+        bytes memory fee
+    )
+        private
+        pure
+        returns (uint128 maxFeeOtoD, bool payInGhoOtoD, uint32 gasLimitOtoD)
+    {
+        if (fee.length < 96) revert FeeOtoDTooShort(fee.length, 96);
+        (maxFeeOtoD, payInGhoOtoD, gasLimitOtoD) = abi.decode(
+            fee,
+            (uint128, bool, uint32)
+        );
+
+        if (gasLimitOtoD < MIN_PROCESS_MESSAGE_GAS) {
+            revert InsufficientGasLimit(gasLimitOtoD, MIN_PROCESS_MESSAGE_GAS);
+        }
+    }
+
+    /**
+     * @dev Returns the current `GHO` balance of the oracle pool of the `CustomSender`.
+     * @return The `GHO` balance of the oracle pool.
+     */
+    function _oraclePoolTokenBalance() private view returns (uint256) {
+        address pool = ICustomSender(CUSTOM_SENDER).getOraclePool();
+        return IERC20(GHO).balanceOf(pool);
+    }
+
+    /**
+     * @dev Converts `ghoAmount` to its sGHO equivalent using the sGHO/GHO exchange rate feed.
+     * The feed answer is treated as the amount of `GHO` assets per 1 sGHO share, scaled by
+     * `10 ** feed.decimals()`, so the result is `ghoAmount * 10 ** feedDecimals / answer`.
+     *
+     * Requirements:
+     *
+     * - The feed answer must be greater than 0.
+     * - The feed must have been updated at most {maxPriceStaleness} seconds ago.
+     *
+     * @param ghoAmount The amount of `GHO` to convert.
+     * @return The equivalent amount of sGHO.
+     */
+    function _computeMinAmountOut(
+        uint256 ghoAmount
+    ) private view returns (uint256) {
+        IAggregatorV3 feed = IAggregatorV3(priceFeed);
+        (, int256 answer, , uint256 updatedAt, ) = feed.latestRoundData();
+
+        require(answer > 0, InvalidPrice(answer));
+        require(
+            block.timestamp - updatedAt <= maxPriceStaleness,
+            StalePriceFeed(updatedAt, maxPriceStaleness)
+        );
+
+        return (ghoAmount * (10 ** feed.decimals())) / uint256(answer);
+    }
 }
