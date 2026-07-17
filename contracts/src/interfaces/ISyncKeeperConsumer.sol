@@ -3,8 +3,12 @@ pragma solidity ^0.8.20;
 
 /**
  * @title ISyncKeeperConsumer Interface
- * @dev The interface of the {SyncKeeperConsumer} contract, the keeper-style consumer that tops up
- * the oracle pool of a `CustomSender` through a Chainlink CRE workflow.
+ * @dev The interface of the {SyncKeeperConsumer} contract, the keeper-style consumer that rebalances
+ * the two sided oracle pool of a `CustomSender` through a Chainlink CRE workflow.
+ *
+ * The oracle pool holds both `GHO` and `SGHO`, and user flow pushes it either way: a deposit takes
+ * `SGHO` out and puts `GHO` in, a redeem does the reverse. A sync corrects the imbalance by sending
+ * the token that is in surplus to the mainnet vault and receiving the token that is short.
  */
 interface ISyncKeeperConsumer {
     /**
@@ -41,11 +45,18 @@ interface ISyncKeeperConsumer {
     error ZeroAmount();
 
     /**
-     * Emitted when the minimum oracle pool balance is updated.
-     * @param previous The previous minimum oracle pool balance.
-     * @param current The new minimum oracle pool balance.
+     * Emitted when the minimum `GHO` balance is updated.
+     * @param previous The previous minimum `GHO` balance.
+     * @param current The new minimum `GHO` balance.
      */
-    event MinOraclePoolBalanceUpdated(uint256 previous, uint256 current);
+    event MinGhoBalanceUpdated(uint256 previous, uint256 current);
+
+    /**
+     * Emitted when the minimum `SGHO` balance is updated.
+     * @param previous The previous minimum `SGHO` balance.
+     * @param current The new minimum `SGHO` balance.
+     */
+    event MinSGhoBalanceUpdated(uint256 previous, uint256 current);
 
     /**
      * Emitted when the sync amount is updated.
@@ -87,38 +98,73 @@ interface ISyncKeeperConsumer {
     event MaxPriceStalenessUpdated(uint256 previous, uint256 current);
 
     /**
+     * Emitted when the oracle pool is rebalanced.
+     * @param tokenSent The address of the token sent to the mainnet vault (the token in surplus).
+     * @param amount The amount of `tokenSent` sent.
+     * @param minAmountOut The minimum amount of the opposite token expected in return.
+     */
+    event SyncPerformed(
+        address indexed tokenSent,
+        uint256 amount,
+        uint256 minAmountOut
+    );
+
+    /**
      * Emitted when a report is processed while the oracle pool is not set on the `CustomSender`,
      * meaning no sync is performed.
      */
     event SyncSkippedOracleMisconfigured();
 
     /**
-     * Emitted when a report is processed while the oracle pool is funded above the threshold,
-     * meaning no sync is performed.
-     * @param poolBalance The current `GHO` balance of the oracle pool.
-     * @param minOraclePoolBalance The balance below which a sync is performed.
+     * Emitted when a report is processed while both sides of the oracle pool are funded above their
+     * thresholds, meaning no sync is performed.
+     * @param ghoBalance The current `GHO` balance of the oracle pool.
+     * @param sGhoBalance The current `SGHO` balance of the oracle pool.
      */
-    event SyncSkippedUpkeepNotNeeded(
-        uint256 poolBalance,
-        uint256 minOraclePoolBalance
-    );
+    event SyncSkippedUpkeepNotNeeded(uint256 ghoBalance, uint256 sGhoBalance);
 
     /**
-     * @dev Sets the oracle pool balance below which a sync is performed.
+     * Emitted when a report is processed while a side of the oracle pool is short but no token is
+     * in surplus to send, meaning no sync is performed. This is the case when both sides are below
+     * their thresholds, or when the funded side sits exactly on its own threshold and so has
+     * nothing spare. The pool needs funding rather than a rebalance.
+     * @param ghoBalance The current `GHO` balance of the oracle pool.
+     * @param sGhoBalance The current `SGHO` balance of the oracle pool.
+     */
+    event SyncSkippedNoSurplus(uint256 ghoBalance, uint256 sGhoBalance);
+
+    /**
+     * @dev Sets the `GHO` balance below which the oracle pool is considered short of `GHO`.
      *
      * Requirements:
      *
      * - `msg.sender` must be the owner.
      * - `minBal` must be greater than 0.
      *
-     * Emits a {MinOraclePoolBalanceUpdated} event.
+     * Emits a {MinGhoBalanceUpdated} event.
      *
-     * @param minBal The new minimum oracle pool balance.
+     * @param minBal The new minimum `GHO` balance.
      */
-    function setMinOraclePoolBalance(uint256 minBal) external;
+    function setMinGhoBalance(uint256 minBal) external;
 
     /**
-     * @dev Sets the amount of `GHO` sent to the oracle pool on each sync.
+     * @dev Sets the `SGHO` balance below which the oracle pool is considered short of `SGHO`.
+     *
+     * Requirements:
+     *
+     * - `msg.sender` must be the owner.
+     * - `minBal` must be greater than 0.
+     *
+     * Emits a {MinSGhoBalanceUpdated} event.
+     *
+     * @param minBal The new minimum `SGHO` balance.
+     */
+    function setMinSGhoBalance(uint256 minBal) external;
+
+    /**
+     * @dev Sets the amount of the surplus token sent on each sync.
+     * The amount is capped at the balance the oracle pool holds of that token above the token's own
+     * threshold, so it is an upper bound rather than an exact size.
      *
      * Requirements:
      *
@@ -163,7 +209,7 @@ interface ISyncKeeperConsumer {
     function setExtraArgs(bytes calldata newExtraArgs) external;
 
     /**
-     * @dev Sets the price feed used to convert the sync amount to its sGHO equivalent.
+     * @dev Sets the price feed used to convert the synced amount to the opposite token.
      *
      * Requirements:
      *
@@ -211,12 +257,17 @@ interface ISyncKeeperConsumer {
     function SGHO() external view returns (address);
 
     /**
-     * @notice Returns the oracle pool balance below which a sync is performed.
+     * @notice Returns the `GHO` balance below which the oracle pool is considered short of `GHO`.
      */
-    function minOraclePoolBalance() external view returns (uint256);
+    function minGhoBalance() external view returns (uint256);
 
     /**
-     * @notice Returns the amount of `GHO` sent to the oracle pool on each sync.
+     * @notice Returns the `SGHO` balance below which the oracle pool is considered short of `SGHO`.
+     */
+    function minSGhoBalance() external view returns (uint256);
+
+    /**
+     * @notice Returns the maximum amount of the surplus token sent on each sync.
      */
     function syncAmount() external view returns (uint256);
 
@@ -241,12 +292,15 @@ interface ISyncKeeperConsumer {
     function extraArgs() external view returns (bytes memory);
 
     /**
-     * @dev Returns whether the oracle pool needs to be topped up.
+     * @dev Returns whether the oracle pool can be rebalanced right now.
      * This is the gate read by the CRE workflow to decide whether to submit a report, and is
-     * re-checked when the resulting report is processed.
+     * re-evaluated when the resulting report is processed.
      *
-     * @return upkeepNeeded True if the oracle pool is set on the `CustomSender` and its `GHO`
-     * balance is strictly below {minOraclePoolBalance}.
+     * It is true only when exactly one side of the pool is below its threshold and the other holds
+     * a balance above its own threshold to send. When both sides are short there is no safe move,
+     * and when both are funded there is nothing to do.
+     *
+     * @return upkeepNeeded True if a sync would be performed.
      */
     function needsUpkeep() external view returns (bool upkeepNeeded);
 }

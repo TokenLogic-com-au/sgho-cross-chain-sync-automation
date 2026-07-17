@@ -16,7 +16,7 @@ export const onCronTrigger = (runtime: Runtime<Config>): string => {
   runtime.log(`needsUpkeep (on-chain): ${upkeepNeeded}`);
 
   if (!upkeepNeeded) {
-    return "Skip sync: needsUpkeep is false (oracle pool balance >= on-chain threshold)";
+    return "Skip sync: needsUpkeep is false (both oracle pool sides funded, or both short)";
   }
 
   const txHash = submitSyncReport(runtime, cfg);

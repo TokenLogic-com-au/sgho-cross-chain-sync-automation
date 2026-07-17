@@ -19,9 +19,9 @@ contract MockCustomSender is ICustomSender {
     bytes public lastFeeData;
     bytes public lastExtraArgs;
 
-    constructor(address gho, address sgho, address oraclePool) {
+    constructor(address gho, address sGho, address oraclePool) {
         GHO = gho;
-        SGHO = sgho;
+        SGHO = sGho;
         _oraclePool = oraclePool;
     }
 
@@ -33,8 +33,8 @@ contract MockCustomSender is ICustomSender {
         GHO = gho;
     }
 
-    function setSgho(address sgho) external {
-        SGHO = sgho;
+    function setSGho(address sGho) external {
+        SGHO = sGho;
     }
 
     function sync(

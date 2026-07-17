@@ -19,14 +19,15 @@ import {MockERC20} from "./mocks/MockERC20.sol";
  * @dev Run with: forge test --match-path tests/TestSyncKeeperConsumer.t.sol -vvv
  */
 contract TestSyncKeeperConsumerBase is Test {
-    uint256 public constant MIN_ORACLE_POOL_BALANCE = 100_000 ether;
+    uint256 public constant MIN_GHO_BALANCE = 200_000 ether;
+    uint256 public constant MIN_SGHO_BALANCE = 100_000 ether;
     uint256 public constant SYNC_AMOUNT = 10_000 ether;
     uint256 public constant MAX_PRICE_STALENESS = 1 days;
     uint128 public constant MAX_FEE = 1 ether;
     uint32 public constant GAS_LIMIT = 500_000;
 
     uint8 public constant FEED_DECIMALS = 18;
-    /// @dev 1 sGHO share is worth exactly 1 GHO, so `minAmountOut` equals the synced amount.
+    /// @dev 1 sGHO share is worth exactly 1 GHO, so a sync converts 1:1 in either direction.
     int256 public constant FEED_ANSWER = 1e18;
 
     uint256 public constant MAX_FUZZ_AMOUNT = 1_000_000_000 ether;
@@ -37,7 +38,7 @@ contract TestSyncKeeperConsumerBase is Test {
     address public immutable ORACLE_POOL = makeAddr("oraclePool");
 
     MockERC20 internal gho;
-    MockERC20 internal sgho;
+    MockERC20 internal sGho;
     MockCustomSender internal customSender;
     MockAggregatorV3 internal feed;
     SyncKeeperConsumer internal consumer;
@@ -47,15 +48,18 @@ contract TestSyncKeeperConsumerBase is Test {
         vm.warp(365 days);
 
         gho = new MockERC20("GHO", "GHO");
-        sgho = new MockERC20("Staked GHO", "sGHO");
+        sGho = new MockERC20("Staked GHO", "sGHO");
         customSender = new MockCustomSender(
             address(gho),
-            address(sgho),
+            address(sGho),
             ORACLE_POOL
         );
         feed = new MockAggregatorV3(FEED_DECIMALS, FEED_ANSWER);
 
         consumer = _deployConsumer();
+
+        // Default to a balanced pool: both sides funded, so no upkeep is needed.
+        _setPoolBalances(MIN_GHO_BALANCE * 2, MIN_SGHO_BALANCE * 2);
     }
 
     function _feeData(
@@ -78,21 +82,40 @@ contract TestSyncKeeperConsumerBase is Test {
                 address(customSender),
                 address(feed),
                 MAX_PRICE_STALENESS,
-                MIN_ORACLE_POOL_BALANCE,
+                MIN_GHO_BALANCE,
+                MIN_SGHO_BALANCE,
                 SYNC_AMOUNT,
                 _defaultFeeData(),
                 EXTRA_ARGS
             );
     }
 
-    /// @dev Forces the GHO balance of the oracle pool to exactly `amount`.
-    function _setPoolBalance(uint256 amount) internal {
-        uint256 current = gho.balanceOf(ORACLE_POOL);
+    /// @dev Forces the oracle pool balances to exactly `ghoBalance` and `sGhoBalance`.
+    function _setPoolBalances(
+        uint256 ghoBalance,
+        uint256 sGhoBalance
+    ) internal {
+        _setBalance(gho, ghoBalance);
+        _setBalance(sGho, sGhoBalance);
+    }
+
+    function _setBalance(MockERC20 token, uint256 amount) private {
+        uint256 current = token.balanceOf(ORACLE_POOL);
         if (amount > current) {
-            gho.mint(ORACLE_POOL, amount - current);
+            token.mint(ORACLE_POOL, amount - current);
         } else if (amount < current) {
-            gho.burn(ORACLE_POOL, current - amount);
+            token.burn(ORACLE_POOL, current - amount);
         }
+    }
+
+    /// @dev Pool is short of GHO, so sGHO is the surplus and should be sent.
+    function _setGhoShort() internal {
+        _setPoolBalances(MIN_GHO_BALANCE - 1, MIN_SGHO_BALANCE * 5);
+    }
+
+    /// @dev Pool is short of sGHO, so GHO is the surplus and should be sent.
+    function _setSGhoShort() internal {
+        _setPoolBalances(MIN_GHO_BALANCE * 5, MIN_SGHO_BALANCE - 1);
     }
 
     /// @dev Submits a report as the trusted forwarder. Metadata is empty, as no workflow identity
@@ -102,11 +125,20 @@ contract TestSyncKeeperConsumerBase is Test {
         consumer.onReport("", "");
     }
 
-    function _expectedMinAmountOut(
+    /// @dev Sending GHO returns sGHO shares: divide by the GHO-per-share rate.
+    function _expectedSGhoOut(
         uint256 ghoAmount,
         int256 answer
     ) internal pure returns (uint256) {
         return (ghoAmount * (10 ** FEED_DECIMALS)) / uint256(answer);
+    }
+
+    /// @dev Sending sGHO returns GHO assets: multiply by the GHO-per-share rate.
+    function _expectedGhoOut(
+        uint256 sGhoAmount,
+        int256 answer
+    ) internal pure returns (uint256) {
+        return (sGhoAmount * uint256(answer)) / (10 ** FEED_DECIMALS);
     }
 }
 
@@ -123,7 +155,8 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
             address(customSender),
             address(feed),
             MAX_PRICE_STALENESS,
-            MIN_ORACLE_POOL_BALANCE,
+            MIN_GHO_BALANCE,
+            MIN_SGHO_BALANCE,
             SYNC_AMOUNT,
             _defaultFeeData(),
             EXTRA_ARGS
@@ -137,7 +170,8 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
             address(0),
             address(feed),
             MAX_PRICE_STALENESS,
-            MIN_ORACLE_POOL_BALANCE,
+            MIN_GHO_BALANCE,
+            MIN_SGHO_BALANCE,
             SYNC_AMOUNT,
             _defaultFeeData(),
             EXTRA_ARGS
@@ -151,7 +185,8 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
             address(customSender),
             address(0),
             MAX_PRICE_STALENESS,
-            MIN_ORACLE_POOL_BALANCE,
+            MIN_GHO_BALANCE,
+            MIN_SGHO_BALANCE,
             SYNC_AMOUNT,
             _defaultFeeData(),
             EXTRA_ARGS
@@ -172,11 +207,41 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         _deployConsumer();
     }
 
-    function testConstructorZeroAddressSgho() public {
-        customSender.setSgho(address(0));
+    function testConstructorZeroAddressSGho() public {
+        customSender.setSGho(address(0));
 
         vm.expectRevert(ISyncKeeperConsumer.ZeroAddress.selector);
         _deployConsumer();
+    }
+
+    function testConstructorZeroMinGhoBalance() public {
+        vm.expectRevert(ISyncKeeperConsumer.ZeroAmount.selector);
+        new SyncKeeperConsumer(
+            FORWARDER,
+            address(customSender),
+            address(feed),
+            MAX_PRICE_STALENESS,
+            0,
+            MIN_SGHO_BALANCE,
+            SYNC_AMOUNT,
+            _defaultFeeData(),
+            EXTRA_ARGS
+        );
+    }
+
+    function testConstructorZeroMinSGhoBalance() public {
+        vm.expectRevert(ISyncKeeperConsumer.ZeroAmount.selector);
+        new SyncKeeperConsumer(
+            FORWARDER,
+            address(customSender),
+            address(feed),
+            MAX_PRICE_STALENESS,
+            MIN_GHO_BALANCE,
+            0,
+            SYNC_AMOUNT,
+            _defaultFeeData(),
+            EXTRA_ARGS
+        );
     }
 
     function testConstructorZeroSyncAmount() public {
@@ -186,7 +251,8 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
             address(customSender),
             address(feed),
             MAX_PRICE_STALENESS,
-            MIN_ORACLE_POOL_BALANCE,
+            MIN_GHO_BALANCE,
+            MIN_SGHO_BALANCE,
             0,
             _defaultFeeData(),
             EXTRA_ARGS
@@ -194,7 +260,6 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
     }
 
     function testConstructorFeeOtoDTooShort() public {
-        // Two words instead of the three required to decode (uint128, bool, uint32).
         bytes memory shortFee = abi.encode(MAX_FEE, false);
 
         vm.expectRevert(
@@ -209,7 +274,8 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
             address(customSender),
             address(feed),
             MAX_PRICE_STALENESS,
-            MIN_ORACLE_POOL_BALANCE,
+            MIN_GHO_BALANCE,
+            MIN_SGHO_BALANCE,
             SYNC_AMOUNT,
             shortFee,
             EXTRA_ARGS
@@ -231,7 +297,8 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
             address(customSender),
             address(feed),
             MAX_PRICE_STALENESS,
-            MIN_ORACLE_POOL_BALANCE,
+            MIN_GHO_BALANCE,
+            MIN_SGHO_BALANCE,
             SYNC_AMOUNT,
             _feeData(MAX_FEE, false, tooLittleGas),
             EXTRA_ARGS
@@ -247,14 +314,11 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         assertEq(c.owner(), address(this), "owner");
         assertEq(c.CUSTOM_SENDER(), address(customSender), "customSender");
         assertEq(c.GHO(), address(gho), "gho");
-        assertEq(c.SGHO(), address(sgho), "sgho");
+        assertEq(c.SGHO(), address(sGho), "sGho");
         assertEq(c.priceFeed(), address(feed), "priceFeed");
         assertEq(c.maxPriceStaleness(), MAX_PRICE_STALENESS, "maxStaleness");
-        assertEq(
-            c.minOraclePoolBalance(),
-            MIN_ORACLE_POOL_BALANCE,
-            "minOraclePoolBalance"
-        );
+        assertEq(c.minGhoBalance(), MIN_GHO_BALANCE, "minGhoBalance");
+        assertEq(c.minSGhoBalance(), MIN_SGHO_BALANCE, "minSGhoBalance");
         assertEq(c.syncAmount(), SYNC_AMOUNT, "syncAmount");
         assertEq(c.feeOtoD(), _defaultFeeData(), "feeOtoD");
         assertEq(c.extraArgs(), EXTRA_ARGS, "extraArgs");
@@ -289,12 +353,12 @@ contract ReceiveTest is TestSyncKeeperConsumerBase {
 }
 
 /**
- * @title SetMinOraclePoolBalanceTest
- * @notice Unit tests for SyncKeeperConsumer.setMinOraclePoolBalance
- * @dev Run with: forge test --match-contract SetMinOraclePoolBalanceTest -vvv
+ * @title SetMinGhoBalanceTest
+ * @notice Unit tests for SyncKeeperConsumer.setMinGhoBalance
+ * @dev Run with: forge test --match-contract SetMinGhoBalanceTest -vvv
  */
-contract SetMinOraclePoolBalanceTest is TestSyncKeeperConsumerBase {
-    function testSetMinOraclePoolBalanceNonOwner() public {
+contract SetMinGhoBalanceTest is TestSyncKeeperConsumerBase {
+    function testSetMinGhoBalanceNonOwner() public {
         vm.prank(USER);
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -302,25 +366,74 @@ contract SetMinOraclePoolBalanceTest is TestSyncKeeperConsumerBase {
                 USER
             )
         );
-        consumer.setMinOraclePoolBalance(1 ether);
+        consumer.setMinGhoBalance(1 ether);
     }
 
-    function testSetMinOraclePoolBalanceZeroAmount() public {
+    function testSetMinGhoBalanceZeroAmount() public {
         vm.expectRevert(ISyncKeeperConsumer.ZeroAmount.selector);
-        consumer.setMinOraclePoolBalance(0);
+        consumer.setMinGhoBalance(0);
     }
 
-    function testSetMinOraclePoolBalance() public {
+    function testSetMinGhoBalance() public {
         uint256 newValue = 777 ether;
 
         vm.expectEmit(true, true, true, true, address(consumer));
-        emit ISyncKeeperConsumer.MinOraclePoolBalanceUpdated(
-            MIN_ORACLE_POOL_BALANCE,
+        emit ISyncKeeperConsumer.MinGhoBalanceUpdated(
+            MIN_GHO_BALANCE,
             newValue
         );
-        consumer.setMinOraclePoolBalance(newValue);
+        consumer.setMinGhoBalance(newValue);
 
-        assertEq(consumer.minOraclePoolBalance(), newValue);
+        assertEq(consumer.minGhoBalance(), newValue);
+    }
+
+    /// @dev The two thresholds are independent.
+    function testSetMinGhoBalanceLeavesSGhoThreshold() public {
+        consumer.setMinGhoBalance(777 ether);
+
+        assertEq(consumer.minSGhoBalance(), MIN_SGHO_BALANCE);
+    }
+}
+
+/**
+ * @title SetMinSGhoBalanceTest
+ * @notice Unit tests for SyncKeeperConsumer.setMinSGhoBalance
+ * @dev Run with: forge test --match-contract SetMinSGhoBalanceTest -vvv
+ */
+contract SetMinSGhoBalanceTest is TestSyncKeeperConsumerBase {
+    function testSetMinSGhoBalanceNonOwner() public {
+        vm.prank(USER);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                Ownable.OwnableUnauthorizedAccount.selector,
+                USER
+            )
+        );
+        consumer.setMinSGhoBalance(1 ether);
+    }
+
+    function testSetMinSGhoBalanceZeroAmount() public {
+        vm.expectRevert(ISyncKeeperConsumer.ZeroAmount.selector);
+        consumer.setMinSGhoBalance(0);
+    }
+
+    function testSetMinSGhoBalance() public {
+        uint256 newValue = 555 ether;
+
+        vm.expectEmit(true, true, true, true, address(consumer));
+        emit ISyncKeeperConsumer.MinSGhoBalanceUpdated(
+            MIN_SGHO_BALANCE,
+            newValue
+        );
+        consumer.setMinSGhoBalance(newValue);
+
+        assertEq(consumer.minSGhoBalance(), newValue);
+    }
+
+    function testSetMinSGhoBalanceLeavesGhoThreshold() public {
+        consumer.setMinSGhoBalance(555 ether);
+
+        assertEq(consumer.minGhoBalance(), MIN_GHO_BALANCE);
     }
 }
 
@@ -519,55 +632,91 @@ contract SetMaxPriceStalenessTest is TestSyncKeeperConsumerBase {
 
 /**
  * @title NeedsUpkeepTest
- * @notice Unit tests for SyncKeeperConsumer.needsUpkeep
+ * @notice Unit tests for SyncKeeperConsumer.needsUpkeep across all four pool states
  * @dev Run with: forge test --match-contract NeedsUpkeepTest -vvv
  */
 contract NeedsUpkeepTest is TestSyncKeeperConsumerBase {
     function testNeedsUpkeepOraclePoolNotSet() public {
-        _setPoolBalance(0);
+        _setGhoShort();
         customSender.setOraclePool(address(0));
 
         assertFalse(consumer.needsUpkeep(), "unset pool must not need upkeep");
     }
 
-    function testNeedsUpkeepBalanceAboveThreshold() public {
-        _setPoolBalance(MIN_ORACLE_POOL_BALANCE + 1);
+    function testNeedsUpkeepBothSidesFunded() public {
+        _setPoolBalances(MIN_GHO_BALANCE, MIN_SGHO_BALANCE);
 
-        assertFalse(consumer.needsUpkeep());
+        assertFalse(consumer.needsUpkeep(), "at threshold is funded");
     }
 
-    /// @dev The gate is strictly below the threshold, so an exact match needs no upkeep.
-    function testNeedsUpkeepBalanceAtThreshold() public {
-        _setPoolBalance(MIN_ORACLE_POOL_BALANCE);
-
-        assertFalse(consumer.needsUpkeep());
-    }
-
-    function testNeedsUpkeepBalanceBelowThreshold() public {
-        _setPoolBalance(MIN_ORACLE_POOL_BALANCE - 1);
+    function testNeedsUpkeepGhoShort() public {
+        _setGhoShort();
 
         assertTrue(consumer.needsUpkeep());
     }
 
-    function testNeedsUpkeep(uint256 balance) public {
-        balance = bound(balance, 0, MAX_FUZZ_AMOUNT);
-        _setPoolBalance(balance);
+    function testNeedsUpkeepSGhoShort() public {
+        _setSGhoShort();
 
-        assertEq(consumer.needsUpkeep(), balance < MIN_ORACLE_POOL_BALANCE);
+        assertTrue(consumer.needsUpkeep());
+    }
+
+    /// @dev With both sides short there is no surplus token to send, so there is no safe move and
+    ///      the workflow must not waste a report.
+    function testNeedsUpkeepBothSidesShort() public {
+        _setPoolBalances(MIN_GHO_BALANCE - 1, MIN_SGHO_BALANCE - 1);
+
+        assertFalse(consumer.needsUpkeep(), "both short has no surplus");
+    }
+
+    /// @dev Each threshold is strictly below, so an exact match counts as funded.
+    function testNeedsUpkeepAtThresholdIsFunded() public {
+        _setPoolBalances(MIN_GHO_BALANCE, MIN_SGHO_BALANCE * 5);
+
+        assertFalse(consumer.needsUpkeep());
+    }
+
+    /// @dev A short side with a counterpart sitting exactly on its own threshold has nothing spare
+    ///      to send, so no report should be submitted.
+    function testNeedsUpkeepSurplusExactlyAtFloor() public {
+        _setPoolBalances(MIN_GHO_BALANCE - 1, MIN_SGHO_BALANCE);
+
+        assertFalse(consumer.needsUpkeep(), "nothing spare above the floor");
+    }
+
+    function testNeedsUpkeep(uint256 ghoBalance, uint256 sGhoBalance) public {
+        ghoBalance = bound(ghoBalance, 0, MAX_FUZZ_AMOUNT);
+        sGhoBalance = bound(sGhoBalance, 0, MAX_FUZZ_AMOUNT);
+        _setPoolBalances(ghoBalance, sGhoBalance);
+
+        bool ghoShort = ghoBalance < MIN_GHO_BALANCE;
+        bool sGhoShort = sGhoBalance < MIN_SGHO_BALANCE;
+
+        // Upkeep is needed exactly when one side is short and the other holds something above its
+        // own threshold to send.
+        bool expected = false;
+        if (ghoShort != sGhoShort) {
+            uint256 sendable = ghoShort
+                ? sGhoBalance - MIN_SGHO_BALANCE
+                : ghoBalance - MIN_GHO_BALANCE;
+            expected = sendable > 0;
+        }
+
+        assertEq(consumer.needsUpkeep(), expected);
     }
 }
 
 /**
  * @title OnReportTest
- * @notice Unit tests for the SyncKeeperConsumer report processing path
+ * @notice Unit tests for the SyncKeeperConsumer report processing and rebalance path
  * @dev Run with: forge test --match-contract OnReportTest -vvv
  */
 contract OnReportTest is TestSyncKeeperConsumerBase {
     function setUp() public override {
         super.setUp();
 
-        // Default to a pool that needs topping up, and a consumer funded for a native fee.
-        _setPoolBalance(MIN_ORACLE_POOL_BALANCE - 1);
+        // Default to a pool short of GHO, and a consumer funded for a native fee.
+        _setGhoShort();
         vm.deal(address(consumer), 10 ether);
     }
 
@@ -594,32 +743,150 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
     }
 
     function testOnReportUpkeepNotNeeded() public {
-        _setPoolBalance(MIN_ORACLE_POOL_BALANCE);
+        _setPoolBalances(MIN_GHO_BALANCE, MIN_SGHO_BALANCE);
 
         vm.expectEmit(true, true, true, true, address(consumer));
         emit ISyncKeeperConsumer.SyncSkippedUpkeepNotNeeded(
-            MIN_ORACLE_POOL_BALANCE,
-            MIN_ORACLE_POOL_BALANCE
+            MIN_GHO_BALANCE,
+            MIN_SGHO_BALANCE
         );
         _submitReport();
 
         assertEq(customSender.syncCallCount(), 0, "must not sync");
     }
 
-    function testOnReportSyncsPayingInNative() public {
+    /// @dev Sending either token would deepen the other side's deficit, so nothing is sent.
+    function testOnReportNoSurplus() public {
+        _setPoolBalances(MIN_GHO_BALANCE - 1, MIN_SGHO_BALANCE - 1);
+
+        vm.expectEmit(true, true, true, true, address(consumer));
+        emit ISyncKeeperConsumer.SyncSkippedNoSurplus(
+            MIN_GHO_BALANCE - 1,
+            MIN_SGHO_BALANCE - 1
+        );
+        _submitReport();
+
+        assertEq(customSender.syncCallCount(), 0, "must not sync");
+    }
+
+    /// @dev Short of GHO: send the surplus sGHO to retrieve GHO.
+    function testOnReportGhoShortSendsSGho() public {
+        _setGhoShort();
+
         _submitReport();
 
         assertEq(customSender.syncCallCount(), 1, "sync count");
-        assertEq(customSender.lastToken(), address(gho), "always syncs GHO");
+        assertEq(customSender.lastToken(), address(sGho), "sends sGHO");
         assertEq(customSender.lastAmount(), SYNC_AMOUNT, "amount");
         assertEq(
             customSender.lastMinAmountOut(),
-            _expectedMinAmountOut(SYNC_AMOUNT, FEED_ANSWER),
-            "minAmountOut"
+            _expectedGhoOut(SYNC_AMOUNT, FEED_ANSWER),
+            "minAmountOut priced as sGHO -> GHO"
         );
         assertEq(customSender.lastFeeData(), _defaultFeeData(), "feeData");
         assertEq(customSender.lastExtraArgs(), EXTRA_ARGS, "extraArgs");
         assertEq(customSender.lastValue(), MAX_FEE, "native fee forwarded");
+    }
+
+    /// @dev Short of sGHO: send the surplus GHO to retrieve sGHO.
+    function testOnReportSGhoShortSendsGho() public {
+        _setSGhoShort();
+
+        _submitReport();
+
+        assertEq(customSender.syncCallCount(), 1, "sync count");
+        assertEq(customSender.lastToken(), address(gho), "sends GHO");
+        assertEq(customSender.lastAmount(), SYNC_AMOUNT, "amount");
+        assertEq(
+            customSender.lastMinAmountOut(),
+            _expectedSGhoOut(SYNC_AMOUNT, FEED_ANSWER),
+            "minAmountOut priced as GHO -> sGHO"
+        );
+    }
+
+    function testOnReportEmitsSyncPerformed() public {
+        _setGhoShort();
+
+        vm.expectEmit(true, true, true, true, address(consumer));
+        emit ISyncKeeperConsumer.SyncPerformed(
+            address(sGho),
+            SYNC_AMOUNT,
+            _expectedGhoOut(SYNC_AMOUNT, FEED_ANSWER)
+        );
+        _submitReport();
+    }
+
+    /// @dev The two directions must price inversely. At a rate above parity, sending sGHO returns
+    ///      MORE GHO, while sending GHO returns FEWER sGHO.
+    function testOnReportPricesDirectionsInversely() public {
+        feed.setAnswer(2e18); // 1 sGHO share is worth 2 GHO
+
+        _setGhoShort();
+        _submitReport();
+        assertEq(
+            customSender.lastMinAmountOut(),
+            SYNC_AMOUNT * 2,
+            "sGHO -> GHO multiplies"
+        );
+
+        _setSGhoShort();
+        _submitReport();
+        assertEq(
+            customSender.lastMinAmountOut(),
+            SYNC_AMOUNT / 2,
+            "GHO -> sGHO divides"
+        );
+    }
+
+    /// @dev The amount is capped at what the surplus side holds ABOVE its own threshold, so
+    ///      OraclePool.pull cannot revert and the surplus side is never drawn through its floor.
+    function testOnReportCapsAmountAtSurplusAboveFloor() public {
+        // sGHO is the surplus but holds only a quarter of syncAmount above its threshold.
+        uint256 spare = SYNC_AMOUNT / 4;
+        _setPoolBalances(MIN_GHO_BALANCE - 1, MIN_SGHO_BALANCE + spare);
+
+        _submitReport();
+
+        assertEq(customSender.lastToken(), address(sGho), "sends sGHO");
+        assertEq(customSender.lastAmount(), spare, "capped at spare above floor");
+        assertEq(
+            customSender.lastMinAmountOut(),
+            _expectedGhoOut(spare, FEED_ANSWER),
+            "minAmountOut uses the capped amount"
+        );
+    }
+
+    /// @dev The anti-drift property: a sync must never draw the surplus side below its own
+    ///      threshold, which would flip the shortage over and oscillate on the next tick.
+    function testOnReportNeverDrawsSurplusBelowItsFloor() public {
+        // syncAmount is far larger than the spare sGHO above the threshold.
+        consumer.setSyncAmount(MIN_SGHO_BALANCE * 100);
+        uint256 spare = 1 ether;
+        _setPoolBalances(MIN_GHO_BALANCE - 1, MIN_SGHO_BALANCE + spare);
+
+        _submitReport();
+
+        assertEq(customSender.lastAmount(), spare, "sends only the spare");
+
+        uint256 remaining = sGho.balanceOf(ORACLE_POOL) -
+            customSender.lastAmount();
+        assertEq(remaining, MIN_SGHO_BALANCE, "surplus side lands on its floor");
+        assertGe(remaining, MIN_SGHO_BALANCE, "never below its floor");
+    }
+
+    /// @dev A funded side sitting exactly on its threshold has nothing spare, so there is no safe
+    ///      sync even though the other side is short.
+    function testOnReportSurplusExactlyAtFloorHasNothingToSend() public {
+        _setPoolBalances(MIN_GHO_BALANCE - 1, MIN_SGHO_BALANCE);
+
+        vm.expectEmit(true, true, true, true, address(consumer));
+        emit ISyncKeeperConsumer.SyncSkippedNoSurplus(
+            MIN_GHO_BALANCE - 1,
+            MIN_SGHO_BALANCE
+        );
+        _submitReport();
+
+        assertEq(customSender.syncCallCount(), 0, "must not sync");
     }
 
     function testOnReportSyncsPayingInGho() public {
@@ -704,18 +971,9 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
 
         assertEq(
             customSender.lastMinAmountOut(),
-            _expectedMinAmountOut(SYNC_AMOUNT, answer),
+            _expectedGhoOut(SYNC_AMOUNT, answer),
             "minAmountOut"
         );
-    }
-
-    /// @dev A sGHO share worth more than 1 GHO buys fewer shares for the same GHO amount.
-    function testOnReportMinAmountOutAboveParity() public {
-        feed.setAnswer(2e18);
-
-        _submitReport();
-
-        assertEq(customSender.lastMinAmountOut(), SYNC_AMOUNT / 2);
     }
 
     function testOnReportSyncsUpdatedAmount() public {
@@ -735,7 +993,17 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         assertEq(customSender.syncCallCount(), 1, "sync count");
     }
 
-    /// @dev needsUpkeep stays true until the pool is topped up, so reports can stack.
+    /// @dev The gate is re-derived on chain, so a report submitted while GHO was short but executed
+    ///      after the pool refilled is a no-op rather than a wrong-direction sync.
+    function testOnReportReDerivesStateAtExecution() public {
+        _setSGhoShort();
+
+        _submitReport();
+
+        assertEq(customSender.lastToken(), address(gho), "re-derived to GHO");
+    }
+
+    /// @dev needsUpkeep stays true until the short side is refilled, so reports can stack.
     function testOnReportSyncsRepeatedly() public {
         _submitReport();
         _submitReport();

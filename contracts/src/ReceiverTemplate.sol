@@ -257,21 +257,16 @@ abstract contract ReceiverTemplate is IReceiver, Ownable {
      * memory rather than through `abi.decode`.
      *
      * @param metadata The metadata of the report.
-     * @return workflowId The id of the workflow that produced the report.
-     * @return workflowName The name of the workflow that produced the report.
-     * @return workflowOwner The address of the owner of the workflow that produced the report.
+     * @return The id of the workflow that produced the report.
+     * @return The name of the workflow that produced the report.
+     * @return The address of the owner of the workflow that produced the report.
      */
     function _decodeMetadata(
         bytes memory metadata
-    )
-        internal
-        pure
-        returns (
-            bytes32 workflowId,
-            bytes10 workflowName,
-            address workflowOwner
-        )
-    {
+    ) internal pure returns (bytes32, bytes10, address) {
+        bytes32 workflowId;
+        bytes10 workflowName;
+        address workflowOwner;
         assembly {
             workflowId := mload(add(metadata, 32))
             workflowName := mload(add(metadata, 64))
