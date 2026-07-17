@@ -127,17 +127,21 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         uint256 minBal
     ) external override onlyOwner {
         require(minBal > 0, ZeroAmount());
+
+        uint256 previousMinBal = minOraclePoolBalance;
         minOraclePoolBalance = minBal;
 
-        emit MinOraclePoolBalanceUpdated(minOraclePoolBalance, minBal);
+        emit MinOraclePoolBalanceUpdated(previousMinBal, minBal);
     }
 
     /// @inheritdoc ISyncKeeperConsumer
     function setSyncAmount(uint256 newAmount) external override onlyOwner {
         require(newAmount > 0, ZeroAmount());
+
+        uint256 previousAmount = syncAmount;
         syncAmount = newAmount;
 
-        emit SyncAmountUpdated(syncAmount, newAmount);
+        emit SyncAmountUpdated(previousAmount, newAmount);
     }
 
     /// @inheritdoc ISyncKeeperConsumer
@@ -166,18 +170,21 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     /// @inheritdoc ISyncKeeperConsumer
     function setPriceFeed(address newFeed) external override onlyOwner {
         if (newFeed == address(0)) revert ZeroAddress();
+
+        address previousFeed = priceFeed;
         priceFeed = newFeed;
 
-        emit PriceFeedUpdated(priceFeed, newFeed);
+        emit PriceFeedUpdated(previousFeed, newFeed);
     }
 
     /// @inheritdoc ISyncKeeperConsumer
     function setMaxPriceStaleness(
         uint256 newStaleness
     ) external override onlyOwner {
+        uint256 previousStaleness = maxPriceStaleness;
         maxPriceStaleness = newStaleness;
 
-        emit MaxPriceStalenessUpdated(maxPriceStaleness, newStaleness);
+        emit MaxPriceStalenessUpdated(previousStaleness, newStaleness);
     }
 
     /// @inheritdoc ISyncKeeperConsumer
