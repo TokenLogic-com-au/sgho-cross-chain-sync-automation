@@ -2,202 +2,292 @@
 // Source: https://docs.chain.link/cre
 pragma solidity ^0.8.0;
 
-import {IERC165} from "./IERC165.sol";
-import {IReceiver} from "./IReceiver.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-/// @title ReceiverTemplate - Abstract receiver with optional permission controls
-/// @notice Provides flexible, updatable security checks for receiving workflow reports
-/// @dev The forwarder address is required at construction time for security.
-///      Additional permission fields can be configured using setter functions.
+import {IERC165} from "./interfaces/IERC165.sol";
+import {IReceiver} from "./interfaces/IReceiver.sol";
+
+/**
+ * @title ReceiverTemplate Contract
+ * @dev The abstract base contract for all contracts receiving keystone reports from a Chainlink CRE
+ * workflow. It validates incoming reports against a set of permission fields before handing the
+ * report body to {_processReport}, which derived contracts implement with their business logic.
+ *
+ * The forwarder address is required at construction. The remaining permission fields are optional,
+ * default to disabled, and can be configured by the owner after deployment. Each field is only
+ * enforced when it is set to a non-zero value.
+ */
 abstract contract ReceiverTemplate is IReceiver, Ownable {
-  // Required permission field at deployment, configurable after
-  address private s_forwarderAddress; // If set, only this address can call onReport
+    /// @dev The lookup table used to convert a byte to its two hex characters.
+    bytes private constant HEX_CHARS = "0123456789abcdef";
 
-  // Optional permission fields (all default to zero = disabled)
-  address private s_expectedAuthor; // If set, only reports from this workflow owner are accepted
-  bytes10 private s_expectedWorkflowName; // Only validated when s_expectedAuthor is also set
-  bytes32 private s_expectedWorkflowId; // If set, only reports from this specific workflow ID are accepted
+    /// @dev The address allowed to call {onReport}. If set to `address(0)`, the check is disabled.
+    address private s_forwarderAddress;
 
-  // Hex character lookup table for bytes-to-hex conversion
-  bytes private constant HEX_CHARS = "0123456789abcdef";
+    /// @dev The workflow owner accepted by {onReport}. If set to `address(0)`, the check is disabled.
+    address private s_expectedAuthor;
 
-  // Custom errors
-  error InvalidForwarderAddress();
-  error InvalidSender(address sender, address expected);
-  error InvalidAuthor(address received, address expected);
-  error InvalidWorkflowName(bytes10 received, bytes10 expected);
-  error InvalidWorkflowId(bytes32 received, bytes32 expected);
-  error WorkflowNameRequiresAuthorValidation();
+    /// @dev The workflow name accepted by {onReport}. Only validated when `s_expectedAuthor` is set.
+    bytes10 private s_expectedWorkflowName;
 
-  // Events
-  event ForwarderAddressUpdated(address indexed previousForwarder, address indexed newForwarder);
-  event ExpectedAuthorUpdated(address indexed previousAuthor, address indexed newAuthor);
-  event ExpectedWorkflowNameUpdated(bytes10 indexed previousName, bytes10 indexed newName);
-  event ExpectedWorkflowIdUpdated(bytes32 indexed previousId, bytes32 indexed newId);
-  event SecurityWarning(string message);
+    /// @dev The workflow id accepted by {onReport}. If set to `bytes32(0)`, the check is disabled.
+    bytes32 private s_expectedWorkflowId;
 
-  /// @notice Constructor sets msg.sender as the owner and configures the forwarder address
-  /// @param _forwarderAddress The address of the Chainlink Forwarder contract (cannot be address(0))
-  /// @dev The forwarder address is required for security - it ensures only verified reports are processed
-  constructor(
-    address _forwarderAddress
-  ) Ownable(msg.sender) {
-    if (_forwarderAddress == address(0)) {
-      revert InvalidForwarderAddress();
-    }
-    s_forwarderAddress = _forwarderAddress;
-    emit ForwarderAddressUpdated(address(0), _forwarderAddress);
-  }
-
-  /// @notice Returns the configured forwarder address
-  /// @return The forwarder address (address(0) if disabled)
-  function getForwarderAddress() external view returns (address) {
-    return s_forwarderAddress;
-  }
-
-  /// @notice Returns the expected workflow author address
-  /// @return The expected author address (address(0) if not set)
-  function getExpectedAuthor() external view returns (address) {
-    return s_expectedAuthor;
-  }
-
-  /// @notice Returns the expected workflow name
-  /// @return The expected workflow name (bytes10(0) if not set)
-  function getExpectedWorkflowName() external view returns (bytes10) {
-    return s_expectedWorkflowName;
-  }
-
-  /// @notice Returns the expected workflow ID
-  /// @return The expected workflow ID (bytes32(0) if not set)
-  function getExpectedWorkflowId() external view returns (bytes32) {
-    return s_expectedWorkflowId;
-  }
-
-  /// @inheritdoc IReceiver
-  /// @dev Performs optional validation checks based on which permission fields are set
-  function onReport(
-    bytes calldata metadata,
-    bytes calldata report
-  ) external override {
-    // Security Check 1: Verify caller is the trusted Chainlink Forwarder (if configured)
-    if (s_forwarderAddress != address(0) && msg.sender != s_forwarderAddress) {
-      revert InvalidSender(msg.sender, s_forwarderAddress);
-    }
-
-    // Security Checks 2-4: Verify workflow identity - ID, owner, and/or name (if any are configured)
-    if (s_expectedWorkflowId != bytes32(0) || s_expectedAuthor != address(0) || s_expectedWorkflowName != bytes10(0)) {
-      (bytes32 workflowId, bytes10 workflowName, address workflowOwner) = _decodeMetadata(metadata);
-
-      if (s_expectedWorkflowId != bytes32(0) && workflowId != s_expectedWorkflowId) {
-        revert InvalidWorkflowId(workflowId, s_expectedWorkflowId);
-      }
-      if (s_expectedAuthor != address(0) && workflowOwner != s_expectedAuthor) {
-        revert InvalidAuthor(workflowOwner, s_expectedAuthor);
-      }
-
-      if (s_expectedWorkflowName != bytes10(0)) {
-        if (s_expectedAuthor == address(0)) {
-          revert WorkflowNameRequiresAuthorValidation();
+    /**
+     * @dev Sets `msg.sender` as the owner and sets the forwarder address.
+     * The forwarder address is required at construction, as it is the check that ensures only
+     * verified reports are processed.
+     *
+     * Requirements:
+     *
+     * - `forwarderAddress` must not be the zero address.
+     *
+     * Emits a {ForwarderAddressUpdated} event.
+     *
+     * @param forwarderAddress The address of the Chainlink Forwarder contract.
+     */
+    constructor(address forwarderAddress) Ownable(msg.sender) {
+        if (forwarderAddress == address(0)) {
+            revert InvalidForwarderAddress();
         }
-        if (workflowName != s_expectedWorkflowName) {
-          revert InvalidWorkflowName(workflowName, s_expectedWorkflowName);
+        s_forwarderAddress = forwarderAddress;
+
+        emit ForwarderAddressUpdated(address(0), forwarderAddress);
+    }
+
+    /// @inheritdoc IReceiver
+    /// @dev Performs the validation checks for each permission field that is set, then forwards
+    ///      `report` to {_processReport}.
+    function onReport(
+        bytes calldata metadata,
+        bytes calldata report
+    ) external override {
+        // Security Check 1: Verify caller is the trusted Chainlink Forwarder (if configured)
+        if (
+            s_forwarderAddress != address(0) && msg.sender != s_forwarderAddress
+        ) {
+            revert InvalidSender(msg.sender, s_forwarderAddress);
         }
-      }
+
+        // Security Checks 2-4: Verify workflow identity - ID, owner, and/or name (if any are configured)
+        if (
+            s_expectedWorkflowId != bytes32(0) ||
+            s_expectedAuthor != address(0) ||
+            s_expectedWorkflowName != bytes10(0)
+        ) {
+            (
+                bytes32 workflowId,
+                bytes10 workflowName,
+                address workflowOwner
+            ) = _decodeMetadata(metadata);
+
+            if (
+                s_expectedWorkflowId != bytes32(0) &&
+                workflowId != s_expectedWorkflowId
+            ) {
+                revert InvalidWorkflowId(workflowId, s_expectedWorkflowId);
+            }
+            if (
+                s_expectedAuthor != address(0) &&
+                workflowOwner != s_expectedAuthor
+            ) {
+                revert InvalidAuthor(workflowOwner, s_expectedAuthor);
+            }
+
+            if (s_expectedWorkflowName != bytes10(0)) {
+                if (s_expectedAuthor == address(0)) {
+                    revert WorkflowNameRequiresAuthorValidation();
+                }
+                if (workflowName != s_expectedWorkflowName) {
+                    revert InvalidWorkflowName(
+                        workflowName,
+                        s_expectedWorkflowName
+                    );
+                }
+            }
+        }
+
+        _processReport(report);
     }
 
-    _processReport(report);
-  }
-
-  /// @notice Updates the forwarder address that is allowed to call onReport
-  /// @param _forwarder The new forwarder address
-  function setForwarderAddress(
-    address _forwarder
-  ) external onlyOwner {
-    address previousForwarder = s_forwarderAddress;
-    if (_forwarder == address(0)) {
-      emit SecurityWarning("Forwarder address set to zero - contract is now INSECURE");
-    }
-    s_forwarderAddress = _forwarder;
-    emit ForwarderAddressUpdated(previousForwarder, _forwarder);
-  }
-
-  /// @notice Updates the expected workflow owner address
-  /// @param _author The new expected author address (use address(0) to disable this check)
-  function setExpectedAuthor(
-    address _author
-  ) external onlyOwner {
-    address previousAuthor = s_expectedAuthor;
-    s_expectedAuthor = _author;
-    emit ExpectedAuthorUpdated(previousAuthor, _author);
-  }
-
-  /// @notice Updates the expected workflow name from a plaintext string
-  /// @param _name The workflow name as a string (use empty string "" to disable this check)
-  function setExpectedWorkflowName(
-    string calldata _name
-  ) external onlyOwner {
-    bytes10 previousName = s_expectedWorkflowName;
-
-    if (bytes(_name).length == 0) {
-      s_expectedWorkflowName = bytes10(0);
-      emit ExpectedWorkflowNameUpdated(previousName, bytes10(0));
-      return;
+    /**
+     * @dev Sets the address allowed to call {onReport}.
+     * Setting `forwarder` to the zero address disables the check and allows any address to submit
+     * reports, which is why doing so also emits a {SecurityWarning} event.
+     *
+     * Requirements:
+     *
+     * - `msg.sender` must be the owner.
+     *
+     * Emits a {ForwarderAddressUpdated} event, and a {SecurityWarning} event if the check is
+     * disabled.
+     *
+     * @param forwarder The address of the new forwarder.
+     */
+    function setForwarderAddress(address forwarder) external onlyOwner {
+        address previousForwarder = s_forwarderAddress;
+        if (forwarder == address(0)) {
+            emit SecurityWarning(
+                "Forwarder address set to zero - contract is now INSECURE"
+            );
+        }
+        s_forwarderAddress = forwarder;
+        emit ForwarderAddressUpdated(previousForwarder, forwarder);
     }
 
-    bytes32 hash = sha256(bytes(_name));
-    bytes memory hexString = _bytesToHexString(abi.encodePacked(hash));
-    bytes memory first10 = new bytes(10);
-    for (uint256 i = 0; i < 10; i++) {
-      first10[i] = hexString[i];
+    /**
+     * @dev Sets the workflow owner accepted by {onReport}.
+     *
+     * Requirements:
+     *
+     * - `msg.sender` must be the owner.
+     *
+     * Emits an {ExpectedAuthorUpdated} event.
+     *
+     * @param author The address of the new expected author, or `address(0)` to disable the check.
+     */
+    function setExpectedAuthor(address author) external onlyOwner {
+        address previousAuthor = s_expectedAuthor;
+        s_expectedAuthor = author;
+
+        emit ExpectedAuthorUpdated(previousAuthor, author);
     }
-    s_expectedWorkflowName = bytes10(first10);
-    emit ExpectedWorkflowNameUpdated(previousName, s_expectedWorkflowName);
-  }
 
-  /// @notice Updates the expected workflow ID
-  /// @param _id The new expected workflow ID (use bytes32(0) to disable this check)
-  function setExpectedWorkflowId(
-    bytes32 _id
-  ) external onlyOwner {
-    bytes32 previousId = s_expectedWorkflowId;
-    s_expectedWorkflowId = _id;
-    emit ExpectedWorkflowIdUpdated(previousId, _id);
-  }
+    /**
+     * @dev Sets the workflow name accepted by {onReport} from its plaintext form.
+     * The name is stored as the first 10 hex characters of its SHA-256 hash, which is the encoding
+     * used in the report metadata. The check is only enforced when the expected author is also set.
+     *
+     * Requirements:
+     *
+     * - `msg.sender` must be the owner.
+     *
+     * Emits an {ExpectedWorkflowNameUpdated} event.
+     *
+     * @param name The name of the workflow, or an empty string to disable the check.
+     */
+    function setExpectedWorkflowName(string calldata name) external onlyOwner {
+        bytes10 previousName = s_expectedWorkflowName;
 
-  function _bytesToHexString(
-    bytes memory data
-  ) private pure returns (bytes memory) {
-    bytes memory hexString = new bytes(data.length * 2);
-    for (uint256 i = 0; i < data.length; i++) {
-      hexString[i * 2] = HEX_CHARS[uint8(data[i] >> 4)];
-      hexString[i * 2 + 1] = HEX_CHARS[uint8(data[i] & 0x0f)];
+        if (bytes(name).length == 0) {
+            s_expectedWorkflowName = bytes10(0);
+            emit ExpectedWorkflowNameUpdated(previousName, bytes10(0));
+            return;
+        }
+
+        bytes32 hash = sha256(bytes(name));
+        bytes memory hexString = _bytesToHexString(abi.encodePacked(hash));
+        bytes memory first10 = new bytes(10);
+        for (uint256 i = 0; i < 10; i++) {
+            first10[i] = hexString[i];
+        }
+        s_expectedWorkflowName = bytes10(first10);
+        emit ExpectedWorkflowNameUpdated(previousName, s_expectedWorkflowName);
     }
-    return hexString;
-  }
 
-  function _decodeMetadata(
-    bytes memory metadata
-  ) internal pure returns (bytes32 workflowId, bytes10 workflowName, address workflowOwner) {
-    assembly {
-      workflowId := mload(add(metadata, 32))
-      workflowName := mload(add(metadata, 64))
-      workflowOwner := shr(mul(12, 8), mload(add(metadata, 74)))
+    /**
+     * @dev Sets the workflow id accepted by {onReport}.
+     *
+     * Requirements:
+     *
+     * - `msg.sender` must be the owner.
+     *
+     * Emits an {ExpectedWorkflowIdUpdated} event.
+     *
+     * @param id The new expected workflow id, or `bytes32(0)` to disable the check.
+     */
+    function setExpectedWorkflowId(bytes32 id) external onlyOwner {
+        bytes32 previousId = s_expectedWorkflowId;
+        s_expectedWorkflowId = id;
+        emit ExpectedWorkflowIdUpdated(previousId, id);
     }
-    return (workflowId, workflowName, workflowOwner);
-  }
 
-  /// @notice Abstract function to process the report data
-  /// @param report The report calldata containing your workflow's encoded data
-  /// @dev Implement this function with your contract's business logic
-  function _processReport(
-    bytes calldata report
-  ) internal virtual;
+    /**
+     * @notice Returns the address allowed to call {onReport}, or `address(0)` if the check is
+     * disabled.
+     */
+    function getForwarderAddress() external view returns (address) {
+        return s_forwarderAddress;
+    }
 
-  /// @inheritdoc IERC165
-  function supportsInterface(
-    bytes4 interfaceId
-  ) public view virtual override returns (bool) {
-    return interfaceId == type(IReceiver).interfaceId || interfaceId == type(IERC165).interfaceId;
-  }
+    /**
+     * @notice Returns the workflow owner accepted by {onReport}, or `address(0)` if the check is
+     * disabled.
+     */
+    function getExpectedAuthor() external view returns (address) {
+        return s_expectedAuthor;
+    }
+
+    /**
+     * @notice Returns the workflow name accepted by {onReport}, or `bytes10(0)` if the check is
+     * disabled.
+     */
+    function getExpectedWorkflowName() external view returns (bytes10) {
+        return s_expectedWorkflowName;
+    }
+
+    /**
+     * @notice Returns the workflow id accepted by {onReport}, or `bytes32(0)` if the check is
+     * disabled.
+     */
+    function getExpectedWorkflowId() external view returns (bytes32) {
+        return s_expectedWorkflowId;
+    }
+
+    /// @inheritdoc IERC165
+    function supportsInterface(
+        bytes4 interfaceId
+    ) public view virtual override returns (bool) {
+        return
+            interfaceId == type(IReceiver).interfaceId ||
+            interfaceId == type(IERC165).interfaceId;
+    }
+
+    /**
+     * @dev Processes the body of a report that passed every configured permission check.
+     * Derived contracts must implement this function with their business logic.
+     *
+     * @param report The encoded workflow report.
+     */
+    function _processReport(bytes calldata report) internal virtual;
+
+    /**
+     * @dev Decodes the workflow identity from the metadata of a report.
+     * The metadata is a packed encoding of the three returned fields, so it is read directly from
+     * memory rather than through `abi.decode`.
+     *
+     * @param metadata The metadata of the report.
+     * @return The id of the workflow that produced the report.
+     * @return The name of the workflow that produced the report.
+     * @return The address of the owner of the workflow that produced the report.
+     */
+    function _decodeMetadata(
+        bytes memory metadata
+    ) internal pure returns (bytes32, bytes10, address) {
+        bytes32 workflowId;
+        bytes10 workflowName;
+        address workflowOwner;
+        assembly {
+            workflowId := mload(add(metadata, 32))
+            workflowName := mload(add(metadata, 64))
+            workflowOwner := shr(mul(12, 8), mload(add(metadata, 74)))
+        }
+        return (workflowId, workflowName, workflowOwner);
+    }
+
+    /**
+     * @dev Converts `data` to its lowercase hex representation, without a `0x` prefix.
+     * @param data The bytes to convert.
+     * @return The hex representation of `data`, twice as long as `data`.
+     */
+    function _bytesToHexString(
+        bytes memory data
+    ) private pure returns (bytes memory) {
+        bytes memory hexString = new bytes(data.length * 2);
+        for (uint256 i = 0; i < data.length; i++) {
+            hexString[i * 2] = HEX_CHARS[uint8(data[i] >> 4)];
+            hexString[i * 2 + 1] = HEX_CHARS[uint8(data[i] & 0x0f)];
+        }
+        return hexString;
+    }
 }

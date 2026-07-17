@@ -47,7 +47,8 @@ function evmClientForConfig(cfg: Config): EVMClient {
   return new EVMClient(resolveEvmNetwork(cfg).chainSelector.selector);
 }
 
-/** On-chain gate: `SyncKeeperConsumer.needsUpkeep()` (oracle pool balance vs contract threshold). */
+/** On-chain gate: `SyncKeeperConsumer.needsUpkeep()` (true when exactly one side of the oracle pool
+ *  is below its on-chain threshold, so there is a surplus token to send). */
 export function readNeedsUpkeep(runtime: Runtime<Config>, cfg: Config): boolean {
   const evmClient = evmClientForConfig(cfg);
   const data = encodeFunctionData({
