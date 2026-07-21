@@ -38,6 +38,7 @@ contract TestSyncKeeperConsumerBase is Test {
     bytes public constant EXTRA_ARGS = hex"c0ffee";
 
     address public immutable FORWARDER = makeAddr("forwarder");
+    address public immutable EXPECTED_AUTHOR = makeAddr("expectedAuthor");
     address public immutable USER = makeAddr("user");
     address public immutable ORACLE_POOL = makeAddr("oraclePool");
 
@@ -83,6 +84,7 @@ contract TestSyncKeeperConsumerBase is Test {
         return
             new SyncKeeperConsumer(
                 FORWARDER,
+                EXPECTED_AUTHOR,
                 address(customSender),
                 address(feed),
                 MAX_PRICE_STALENESS,
@@ -91,9 +93,14 @@ contract TestSyncKeeperConsumerBase is Test {
                 SYNC_AMOUNT,
                 MIN_SYNC_AMOUNT,
                 SETTLEMENT_WINDOW,
-                _defaultFeeData(),
-                EXTRA_ARGS
+                _defaultFeeData()
             );
+    }
+
+    /// @dev Builds report metadata carrying `author` as the workflow owner, at the packed offset
+    ///      {ReceiverTemplate} decodes. Workflow id and name are left zero (their checks are off).
+    function _metadata(address author) internal pure returns (bytes memory) {
+        return abi.encodePacked(bytes32(0), bytes10(0), author);
     }
 
     /// @dev Forces the oracle pool balances to exactly `ghoBalance` and `sGhoBalance`.
@@ -124,11 +131,11 @@ contract TestSyncKeeperConsumerBase is Test {
         _setPoolBalances(MIN_GHO_BALANCE * 5, MIN_SGHO_BALANCE - 1);
     }
 
-    /// @dev Submits a report as the trusted forwarder. Metadata is empty, as no workflow identity
-    ///      check is configured by default.
+    /// @dev Submits a report as the trusted forwarder, carrying the expected author in metadata so
+    ///      it passes the enforced author check.
     function _submitReport() internal {
         vm.prank(FORWARDER);
-        consumer.onReport("", "");
+        consumer.onReport(_metadata(EXPECTED_AUTHOR), "");
     }
 
     /// @dev Sending GHO returns sGHO shares: divide by the GHO-per-share rate.
@@ -169,6 +176,7 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         return
             new SyncKeeperConsumer(
                 forwarder,
+                EXPECTED_AUTHOR,
                 customSender_,
                 priceFeed_,
                 MAX_PRICE_STALENESS,
@@ -177,9 +185,25 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
                 sync_,
                 minSync,
                 SETTLEMENT_WINDOW,
-                fee,
-                EXTRA_ARGS
+                fee
             );
+    }
+
+    function testConstructorZeroAuthor() public {
+        vm.expectRevert(ISyncKeeperConsumer.ZeroAddress.selector);
+        new SyncKeeperConsumer(
+            FORWARDER,
+            address(0),
+            address(customSender),
+            address(feed),
+            MAX_PRICE_STALENESS,
+            MIN_GHO_BALANCE,
+            MIN_SGHO_BALANCE,
+            SYNC_AMOUNT,
+            MIN_SYNC_AMOUNT,
+            SETTLEMENT_WINDOW,
+            _defaultFeeData()
+        );
     }
 
     function testConstructorZeroAddressForwarder() public {
@@ -351,6 +375,7 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         SyncKeeperConsumer c = _deployConsumer();
 
         assertEq(c.getForwarderAddress(), FORWARDER, "forwarder");
+        assertEq(c.getExpectedAuthor(), EXPECTED_AUTHOR, "expectedAuthor");
         assertEq(c.owner(), address(this), "owner");
         assertEq(c.CUSTOM_SENDER(), address(customSender), "customSender");
         assertEq(c.GHO(), address(gho), "gho");
@@ -364,7 +389,6 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         assertEq(c.settlementWindow(), SETTLEMENT_WINDOW, "settlementWindow");
         assertEq(c.lastSyncAt(), 0, "lastSyncAt");
         assertEq(c.feeOtoD(), _defaultFeeData(), "feeOtoD");
-        assertEq(c.extraArgs(), EXTRA_ARGS, "extraArgs");
         assertEq(c.MIN_PROCESS_MESSAGE_GAS(), 400_000, "minProcessMessageGas");
     }
 
@@ -539,7 +563,10 @@ contract SetMinSyncAmountTest is TestSyncKeeperConsumerBase {
         uint256 newValue = 250 ether;
 
         vm.expectEmit(true, true, true, true, address(consumer));
-        emit ISyncKeeperConsumer.MinSyncAmountUpdated(MIN_SYNC_AMOUNT, newValue);
+        emit ISyncKeeperConsumer.MinSyncAmountUpdated(
+            MIN_SYNC_AMOUNT,
+            newValue
+        );
         consumer.setMinSyncAmount(newValue);
 
         assertEq(consumer.minSyncAmount(), newValue);
@@ -645,40 +672,6 @@ contract SetFeeOtoDTest is TestSyncKeeperConsumerBase {
         consumer.setFeeOtoD(newFee);
 
         assertEq(consumer.feeOtoD(), newFee);
-    }
-}
-
-/**
- * @title SetExtraArgsTest
- * @notice Unit tests for SyncKeeperConsumer.setExtraArgs
- * @dev Run with: forge test --match-contract SetExtraArgsTest -vvv
- */
-contract SetExtraArgsTest is TestSyncKeeperConsumerBase {
-    function testSetExtraArgsNonOwner() public {
-        vm.prank(USER);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                Ownable.OwnableUnauthorizedAccount.selector,
-                USER
-            )
-        );
-        consumer.setExtraArgs(hex"dead");
-    }
-
-    function testSetExtraArgs() public {
-        bytes memory newArgs = hex"deadbeef";
-
-        vm.expectEmit(true, true, true, true, address(consumer));
-        emit ISyncKeeperConsumer.ExtraArgsUpdated(newArgs);
-        consumer.setExtraArgs(newArgs);
-
-        assertEq(consumer.extraArgs(), newArgs);
-    }
-
-    function testSetExtraArgsEmpty() public {
-        consumer.setExtraArgs("");
-
-        assertEq(consumer.extraArgs(), "", "empty extra args accepted");
     }
 }
 
@@ -1007,7 +1000,11 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         _submitReport();
 
         assertEq(customSender.lastToken(), address(sGho), "sends sGHO");
-        assertEq(customSender.lastAmount(), spare, "capped at spare above floor");
+        assertEq(
+            customSender.lastAmount(),
+            spare,
+            "capped at spare above floor"
+        );
         assertEq(
             customSender.lastMinAmountOut(),
             _expectedGhoOut(spare, FEED_ANSWER),
@@ -1029,7 +1026,11 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
 
         uint256 remaining = sGho.balanceOf(ORACLE_POOL) -
             customSender.lastAmount();
-        assertEq(remaining, MIN_SGHO_BALANCE, "surplus side lands on its floor");
+        assertEq(
+            remaining,
+            MIN_SGHO_BALANCE,
+            "surplus side lands on its floor"
+        );
         assertGe(remaining, MIN_SGHO_BALANCE, "never below its floor");
     }
 
@@ -1072,7 +1073,11 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         _submitReport();
 
         assertEq(customSender.syncCallCount(), 1, "sync count");
-        assertEq(customSender.lastValue(), 0, "no native value when paying GHO");
+        assertEq(
+            customSender.lastValue(),
+            0,
+            "no native value when paying GHO"
+        );
     }
 
     /// @dev The consumer holds no native token, so forwarding the fee fails.
@@ -1081,7 +1086,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
 
         vm.prank(FORWARDER);
         vm.expectRevert();
-        consumer.onReport("", "");
+        consumer.onReport(_metadata(EXPECTED_AUTHOR), "");
     }
 
     /// @dev A zero feed answer is treated as an unactionable state: skip and emit, never revert, so
@@ -1173,9 +1178,28 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
     /// @dev The report body is ignored, so an arbitrary payload still syncs.
     function testOnReportIgnoresReportBody() public {
         vm.prank(FORWARDER);
-        consumer.onReport("", abi.encode(uint256(1234), "junk"));
+        consumer.onReport(
+            _metadata(EXPECTED_AUTHOR),
+            abi.encode(uint256(1234), "junk")
+        );
 
         assertEq(customSender.syncCallCount(), 1, "sync count");
+    }
+
+    /// @dev A report whose metadata carries a different workflow owner is rejected: this is the
+    ///      finding-4 fix — a co-hosted workflow on the shared forwarder cannot force a sync.
+    function testOnReportRejectsWrongAuthor() public {
+        address wrongAuthor = makeAddr("wrongAuthor");
+
+        vm.prank(FORWARDER);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IReceiver.InvalidAuthor.selector,
+                wrongAuthor,
+                EXPECTED_AUTHOR
+            )
+        );
+        consumer.onReport(_metadata(wrongAuthor), "");
     }
 
     /// @dev The gate is re-derived on chain, so a report submitted while GHO was short but executed
