@@ -936,7 +936,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
             "minAmountOut priced as sGHO -> GHO"
         );
         assertEq(customSender.lastFeeData(), _defaultFeeData(), "feeData");
-        assertEq(customSender.lastExtraArgs(), EXTRA_ARGS, "extraArgs");
+        assertEq(customSender.lastExtraArgs(), "", "extraArgs empty");
         assertEq(customSender.lastValue(), MAX_FEE, "native fee forwarded");
     }
 

@@ -33,8 +33,8 @@ import {ISyncKeeperConsumer} from "./interfaces/ISyncKeeperConsumer.sol";
  *
  * {CUSTOM_SENDER}, {GHO} and {SGHO} are immutable and cached from the `CustomSender` at
  * construction. The thresholds ({minGhoBalance}, {minSGhoBalance}), the sync parameters
- * ({syncAmount}, {feeOtoD}, {extraArgs}) and the feed configuration ({priceFeed},
- * {maxPriceStaleness}) are owner-updatable.
+ * ({syncAmount}, {minSyncAmount}, {settlementWindow}, {feeOtoD}) and the feed configuration
+ * ({priceFeed}, {maxPriceStaleness}) are owner-updatable.
  */
 contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     /// @inheritdoc ISyncKeeperConsumer
@@ -90,8 +90,9 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      *   {MIN_PROCESS_MESSAGE_GAS}.
      *
      * `expectedAuthor_` pins the workflow owner whose reports {onReport} accepts, so that a report
-     * from another workflow sharing the same forwarder cannot trigger a sync. It is required here
-     * and {setExpectedAuthor} rejects the zero address, so the check can never be disabled.
+     * from another workflow sharing the same forwarder cannot trigger a sync. It is required at
+     * construction; the owner can later change it, or clear it, through the inherited
+     * {setExpectedAuthor}, so operators must keep an author configured to preserve this protection.
      *
      * `settlementWindow_` may be 0, which disables the cooldown and allows back-to-back syncs.
      * For sensible sizing `minSyncAmount_` should be no greater than `syncAmount_`, though this is
