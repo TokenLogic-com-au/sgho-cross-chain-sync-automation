@@ -25,19 +25,6 @@ interface ISyncKeeperConsumer {
      */
     error InsufficientGasLimit(uint32 gasLimit, uint32 minGas);
 
-    /**
-     * @dev The price feed reported a non-positive answer.
-     * @param answer The answer reported by the price feed.
-     */
-    error InvalidPrice(int256 answer);
-
-    /**
-     * @dev The price feed was last updated longer than {maxPriceStaleness} ago.
-     * @param updatedAt The timestamp at which the price feed was last updated.
-     * @param maxStaleness The maximum age tolerated for the price feed answer.
-     */
-    error StalePriceFeed(uint256 updatedAt, uint256 maxStaleness);
-
     /// @dev A required address parameter is the zero address.
     error ZeroAddress();
 
@@ -64,6 +51,20 @@ interface ISyncKeeperConsumer {
      * @param current The new sync amount.
      */
     event SyncAmountUpdated(uint256 previous, uint256 current);
+
+    /**
+     * Emitted when the minimum sync amount is updated.
+     * @param previous The previous minimum sync amount.
+     * @param current The new minimum sync amount.
+     */
+    event MinSyncAmountUpdated(uint256 previous, uint256 current);
+
+    /**
+     * Emitted when the settlement window is updated.
+     * @param previous The previous settlement window, in seconds.
+     * @param current The new settlement window, in seconds.
+     */
+    event SettlementWindowUpdated(uint256 previous, uint256 current);
 
     /**
      * Emitted when the CCIP fee data is updated.
@@ -124,14 +125,29 @@ interface ISyncKeeperConsumer {
     event SyncSkippedUpkeepNotNeeded(uint256 ghoBalance, uint256 sGhoBalance);
 
     /**
-     * Emitted when a report is processed while a side of the oracle pool is short but no token is
-     * in surplus to send, meaning no sync is performed. This is the case when both sides are below
-     * their thresholds, or when the funded side sits exactly on its own threshold and so has
-     * nothing spare. The pool needs funding rather than a rebalance.
+     * Emitted when a report is processed while a side of the oracle pool is short but no actionable
+     * surplus exists to send, meaning no sync is performed. This covers both sides being below their
+     * thresholds, and the funded side holding less than {minSyncAmount} above its own threshold.
      * @param ghoBalance The current `GHO` balance of the oracle pool.
      * @param sGhoBalance The current `SGHO` balance of the oracle pool.
      */
     event SyncSkippedNoSurplus(uint256 ghoBalance, uint256 sGhoBalance);
+
+    /**
+     * Emitted when a report is processed within the {settlementWindow} of the previous sync, whose
+     * counter-token is still settling over CCIP, so no sync is performed. The report is not retried;
+     * the next report proceeds once the window elapses.
+     * @param lastSyncAt The timestamp of the previous sync.
+     * @param settlementWindow The cooldown in force, in seconds.
+     */
+    event SyncSkippedCooldown(uint256 lastSyncAt, uint256 settlementWindow);
+
+    /**
+     * Emitted when a report is processed while the price feed is non-positive, stale, or timestamped
+     * in the future, so a fair `minAmountOut` cannot be derived and no sync is performed. The report
+     * is not retried; the next report proceeds once the feed recovers.
+     */
+    event SyncSkippedStalePrice();
 
     /**
      * @dev Sets the `GHO` balance below which the oracle pool is considered short of `GHO`.
@@ -176,6 +192,37 @@ interface ISyncKeeperConsumer {
      * @param newAmount The new sync amount.
      */
     function setSyncAmount(uint256 newAmount) external;
+
+    /**
+     * @dev Sets the minimum surplus above threshold required to perform a sync. A surplus smaller
+     * than this does not justify a fixed CCIP fee and is treated as no surplus. Should be no greater
+     * than {syncAmount} for sensible sizing, though this is not enforced.
+     *
+     * Requirements:
+     *
+     * - `msg.sender` must be the owner.
+     * - `newAmount` must be greater than 0.
+     *
+     * Emits a {MinSyncAmountUpdated} event.
+     *
+     * @param newAmount The new minimum sync amount.
+     */
+    function setMinSyncAmount(uint256 newAmount) external;
+
+    /**
+     * @dev Sets the minimum delay between syncs, in seconds. After a sync, reports within this
+     * window are skipped so that the in-flight counter-token can settle before another correction is
+     * made. Setting it to 0 disables the cooldown and allows back-to-back syncs.
+     *
+     * Requirements:
+     *
+     * - `msg.sender` must be the owner.
+     *
+     * Emits a {SettlementWindowUpdated} event.
+     *
+     * @param newWindow The new settlement window, in seconds.
+     */
+    function setSettlementWindow(uint256 newWindow) external;
 
     /**
      * @dev Sets the CCIP fee data forwarded to `CustomSender.sync`.
@@ -272,6 +319,11 @@ interface ISyncKeeperConsumer {
     function syncAmount() external view returns (uint256);
 
     /**
+     * @notice Returns the minimum surplus above threshold required to perform a sync.
+     */
+    function minSyncAmount() external view returns (uint256);
+
+    /**
      * @notice Returns the address of the sGHO/GHO exchange rate feed.
      */
     function priceFeed() external view returns (address);
@@ -280,6 +332,16 @@ interface ISyncKeeperConsumer {
      * @notice Returns the maximum age tolerated for the price feed answer, in seconds.
      */
     function maxPriceStaleness() external view returns (uint256);
+
+    /**
+     * @notice Returns the minimum delay between syncs, in seconds (0 if the cooldown is disabled).
+     */
+    function settlementWindow() external view returns (uint256);
+
+    /**
+     * @notice Returns the timestamp of the most recent sync, or 0 if none has occurred.
+     */
+    function lastSyncAt() external view returns (uint256);
 
     /**
      * @notice Returns the encoded CCIP fee data forwarded to `CustomSender.sync`.
@@ -296,9 +358,11 @@ interface ISyncKeeperConsumer {
      * This is the gate read by the CRE workflow to decide whether to submit a report, and is
      * re-evaluated when the resulting report is processed.
      *
-     * It is true only when exactly one side of the pool is below its threshold and the other holds
-     * a balance above its own threshold to send. When both sides are short there is no safe move,
-     * and when both are funded there is nothing to do.
+     * It is true only when exactly one side of the pool is below its threshold, the other holds at
+     * least {minSyncAmount} above its own threshold to send, no {settlementWindow} cooldown from a
+     * prior sync is in force, and the price feed is usable (positive and within {maxPriceStaleness}).
+     * The gate applies the identical checks the executor applies, so it never signals a sync that
+     * {onReport} would then skip.
      *
      * @return upkeepNeeded True if a sync would be performed.
      */
