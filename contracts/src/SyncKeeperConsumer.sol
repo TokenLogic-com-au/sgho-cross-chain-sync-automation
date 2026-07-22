@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import {ReceiverTemplate} from "./ReceiverTemplate.sol";
 import {IAggregatorV3} from "./interfaces/IAggregatorV3.sol";
@@ -28,8 +29,10 @@ import {ISyncKeeperConsumer} from "./interfaces/ISyncKeeperConsumer.sol";
  * re-derives which token is in surplus, and calls `CustomSender.sync`. The body of the report is
  * ignored, as every parameter of the sync is derived on chain.
  *
- * This contract must be granted the `SYNC_ROLE` on the `CustomSender`, and must hold enough native
- * token to cover the CCIP fee whenever the fee is not paid in `GHO`.
+ * This contract must be granted the `SYNC_ROLE` on the `CustomSender`. To cover the CCIP fee it must
+ * hold enough native token when the fee is paid in native, or enough `GHO` when the fee is paid in
+ * `GHO`; for the latter it grants the `CustomSender` an unlimited `GHO` allowance at construction so
+ * the sender can pull the fee.
  *
  * {CUSTOM_SENDER}, {GHO} and {SGHO} are immutable and cached from the `CustomSender` at
  * construction. The thresholds ({minGhoBalance}, {minSGhoBalance}), the sync parameters
@@ -37,6 +40,8 @@ import {ISyncKeeperConsumer} from "./interfaces/ISyncKeeperConsumer.sol";
  * ({priceFeed}, {maxPriceStaleness}) are owner-updatable.
  */
 contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
+    using SafeERC20 for IERC20;
+
     /// @inheritdoc ISyncKeeperConsumer
     uint32 public constant MIN_PROCESS_MESSAGE_GAS = 400_000;
 
@@ -128,9 +133,6 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
             ZeroAddress()
         );
 
-        // A zero threshold would mean that side is never considered short, silently disabling half
-        // of the rebalance. A zero `minSyncAmount_` would let a zero `sendable` slip past the floor
-        // in {_evaluatePool} and produce a zero-amount sync that `CustomSender.sync` rejects.
         require(
             minGhoBalance_ > 0 &&
                 minSGhoBalance_ > 0 &&
@@ -155,6 +157,8 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         minSyncAmount = minSyncAmount_;
         settlementWindow = settlementWindow_;
         _feeOtoD = feeOtoD_;
+
+        IERC20(gho).forceApprove(customSender_, type(uint256).max);
     }
 
     /**
@@ -263,12 +267,8 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         );
         if (surplusToken == address(0)) return false;
 
-        // The previous sync's return leg is still settling over CCIP during the window, so signal
-        // no upkeep to avoid stacking corrections on a not-yet-refilled pool.
         if (_inCooldown()) return false;
 
-        // Apply the same price gate the executor applies, so the gate never signals a sync that
-        // {_processReport} would skip on a stale or invalid feed.
         uint256 amount = syncAmount < sendable ? syncAmount : sendable;
         (bool ok, ) = _quote(surplusToken, amount);
 
@@ -424,7 +424,6 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
 
         address surplusToken = ghoShort ? SGHO : GHO;
 
-        // The surplus side is at or above its own threshold, so neither branch can underflow.
         uint256 sendable = ghoShort
             ? sGhoBalance - minSGhoBalance
             : ghoBalance - minGhoBalance;

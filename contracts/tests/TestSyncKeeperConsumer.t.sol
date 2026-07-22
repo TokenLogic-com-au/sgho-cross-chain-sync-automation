@@ -1067,8 +1067,11 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         assertEq(customSender.syncCallCount(), 0, "must not sync dust");
     }
 
+    /// @dev Paying the fee in GHO: the CustomSender pulls it from the consumer, which works because
+    ///      the consumer approved the sender at construction and is funded with GHO here.
     function testOnReportSyncsPayingInGho() public {
         consumer.setFeeOtoD(_feeData(MAX_FEE, true, GAS_LIMIT));
+        gho.mint(address(consumer), MAX_FEE);
 
         _submitReport();
 
@@ -1078,6 +1081,32 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
             0,
             "no native value when paying GHO"
         );
+        assertEq(gho.balanceOf(address(consumer)), 0, "GHO fee pulled");
+        assertEq(
+            gho.balanceOf(address(customSender)),
+            MAX_FEE,
+            "sender received the GHO fee"
+        );
+    }
+
+    /// @dev Without the construction-time allowance the CustomSender could not pull the GHO fee;
+    ///      the max approval is what makes the pay-in-GHO path work (finding 5 fix).
+    function testConsumerApprovesGhoToCustomSender() public view {
+        assertEq(
+            gho.allowance(address(consumer), address(customSender)),
+            type(uint256).max,
+            "unlimited GHO allowance to sender"
+        );
+    }
+
+    /// @dev Paying in GHO still fails cleanly if the operator has not funded the consumer with GHO.
+    function testOnReportPayingInGhoRevertsWithoutGho() public {
+        consumer.setFeeOtoD(_feeData(MAX_FEE, true, GAS_LIMIT));
+        // No GHO minted to the consumer.
+
+        vm.prank(FORWARDER);
+        vm.expectRevert();
+        consumer.onReport(_metadata(EXPECTED_AUTHOR), "");
     }
 
     /// @dev The consumer holds no native token, so forwarding the fee fails.
