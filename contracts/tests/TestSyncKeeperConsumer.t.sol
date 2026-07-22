@@ -9,6 +9,7 @@ import {SyncKeeperConsumer} from "../src/SyncKeeperConsumer.sol";
 import {IERC165} from "../src/interfaces/IERC165.sol";
 import {IReceiver} from "../src/interfaces/IReceiver.sol";
 import {ISyncKeeperConsumer} from "../src/interfaces/ISyncKeeperConsumer.sol";
+import {ExtraArgsCodec} from "../src/libraries/ExtraArgsCodec.sol";
 import {MockAggregatorV3} from "./mocks/MockAggregatorV3.sol";
 import {MockCustomSender} from "./mocks/MockCustomSender.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
@@ -348,13 +349,14 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
     }
 
     function testConstructorInsufficientGasLimit() public {
-        uint32 tooLittleGas = 400_000 - 1;
+        uint32 minGas = consumer.MIN_PROCESS_MESSAGE_GAS();
+        uint32 tooLittleGas = minGas - 1;
 
         vm.expectRevert(
             abi.encodeWithSelector(
                 ISyncKeeperConsumer.InsufficientGasLimit.selector,
                 tooLittleGas,
-                400_000
+                minGas
             )
         );
         _deploy(
@@ -389,7 +391,7 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         assertEq(c.settlementWindow(), SETTLEMENT_WINDOW, "settlementWindow");
         assertEq(c.lastSyncAt(), 0, "lastSyncAt");
         assertEq(c.feeOtoD(), _defaultFeeData(), "feeOtoD");
-        assertEq(c.MIN_PROCESS_MESSAGE_GAS(), 400_000, "minProcessMessageGas");
+        assertEq(c.MIN_PROCESS_MESSAGE_GAS(), 100_000, "minProcessMessageGas");
     }
 
     /// @dev The GHO and SGHO addresses are cached at construction, so later changes on the sender
@@ -644,20 +646,22 @@ contract SetFeeOtoDTest is TestSyncKeeperConsumerBase {
     }
 
     function testSetFeeOtoDInsufficientGasLimit() public {
-        uint32 tooLittleGas = 400_000 - 1;
+        uint32 minGas = consumer.MIN_PROCESS_MESSAGE_GAS();
+        uint32 tooLittleGas = minGas - 1;
 
         vm.expectRevert(
             abi.encodeWithSelector(
                 ISyncKeeperConsumer.InsufficientGasLimit.selector,
                 tooLittleGas,
-                400_000
+                minGas
             )
         );
         consumer.setFeeOtoD(_feeData(MAX_FEE, false, tooLittleGas));
     }
 
     function testSetFeeOtoDAtMinimumGasLimit() public {
-        bytes memory newFee = _feeData(MAX_FEE, false, 400_000);
+        uint32 minGas = consumer.MIN_PROCESS_MESSAGE_GAS();
+        bytes memory newFee = _feeData(MAX_FEE, false, minGas);
         consumer.setFeeOtoD(newFee);
 
         assertEq(consumer.feeOtoD(), newFee, "minimum gas limit accepted");
@@ -672,6 +676,106 @@ contract SetFeeOtoDTest is TestSyncKeeperConsumerBase {
         consumer.setFeeOtoD(newFee);
 
         assertEq(consumer.feeOtoD(), newFee);
+    }
+}
+
+/**
+ * @title SetExtraArgsTest
+ * @notice Unit tests for SyncKeeperConsumer.setExtraArgs
+ * @dev Run with: forge test --match-contract SetExtraArgsTest -vvv
+ */
+contract SetExtraArgsTest is TestSyncKeeperConsumerBase {
+    /// @dev Builds valid GENERIC_EXTRA_ARGS_V3 extra arguments carrying `gasLimit`, with every
+    ///      other field left at its empty default.
+    function _extraArgs(uint32 gasLimit) internal pure returns (bytes memory) {
+        ExtraArgsCodec.GenericExtraArgsV3 memory args = ExtraArgsCodec
+            .GenericExtraArgsV3({
+                gasLimit: gasLimit,
+                requestedFinalityConfig: bytes4(0),
+                ccvs: new address[](0),
+                ccvArgs: new bytes[](0),
+                executor: address(0),
+                executorArgs: "",
+                tokenReceiver: "",
+                tokenArgs: ""
+            });
+
+        return
+            bytes.concat(
+                ExtraArgsCodec.GENERIC_EXTRA_ARGS_V3_TAG,
+                abi.encode(args)
+            );
+    }
+
+    function testSetExtraArgsNonOwner() public {
+        vm.prank(USER);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                Ownable.OwnableUnauthorizedAccount.selector,
+                USER
+            )
+        );
+        consumer.setExtraArgs(hex"dead");
+    }
+
+    function testSetExtraArgsInvalidTag() public {
+        bytes memory badArgs = hex"deadbeef";
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ISyncKeeperConsumer.InvalidExtraArgsTag.selector,
+                bytes4(hex"deadbeef")
+            )
+        );
+        consumer.setExtraArgs(badArgs);
+    }
+
+    /// @dev A non-empty input shorter than 4 bytes is right-padded with zeros before the tag check.
+    function testSetExtraArgsShortTag() public {
+        bytes memory badArgs = hex"dead";
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ISyncKeeperConsumer.InvalidExtraArgsTag.selector,
+                bytes4(hex"dead0000")
+            )
+        );
+        consumer.setExtraArgs(badArgs);
+    }
+
+    function testSetExtraArgsInsufficientGasLimit() public {
+        uint32 tooLittleGas = consumer.MIN_PROCESS_MESSAGE_GAS() - 1;
+
+        vm.expectRevert(ISyncKeeperConsumer.InvalidGasLimit.selector);
+        consumer.setExtraArgs(_extraArgs(tooLittleGas));
+    }
+
+    function testSetExtraArgsAtMinimumGasLimit() public {
+        bytes memory newArgs = _extraArgs(consumer.MIN_PROCESS_MESSAGE_GAS());
+
+        vm.expectEmit(true, true, true, true, address(consumer));
+        emit ISyncKeeperConsumer.ExtraArgsUpdated(newArgs);
+        consumer.setExtraArgs(newArgs);
+
+        assertEq(consumer.extraArgs(), newArgs, "minimum gas limit accepted");
+    }
+
+    function testSetExtraArgs() public {
+        bytes memory newArgs = _extraArgs(GAS_LIMIT);
+
+        vm.expectEmit(true, true, true, true, address(consumer));
+        emit ISyncKeeperConsumer.ExtraArgsUpdated(newArgs);
+        consumer.setExtraArgs(newArgs);
+
+        assertEq(consumer.extraArgs(), newArgs);
+    }
+
+    function testSetExtraArgsEmpty() public {
+        vm.expectEmit(true, true, true, true, address(consumer));
+        emit ISyncKeeperConsumer.ExtraArgsUpdated("");
+        consumer.setExtraArgs("");
+
+        assertEq(consumer.extraArgs(), "", "empty extra args accepted");
     }
 }
 

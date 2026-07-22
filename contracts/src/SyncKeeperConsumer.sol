@@ -5,6 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import {ReceiverTemplate} from "./ReceiverTemplate.sol";
+import {ExtraArgsCodec} from "./libraries/ExtraArgsCodec.sol";
 import {IAggregatorV3} from "./interfaces/IAggregatorV3.sol";
 import {ICustomSender} from "./interfaces/ICustomSender.sol";
 import {ISyncKeeperConsumer} from "./interfaces/ISyncKeeperConsumer.sol";
@@ -43,7 +44,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     using SafeERC20 for IERC20;
 
     /// @inheritdoc ISyncKeeperConsumer
-    uint32 public constant MIN_PROCESS_MESSAGE_GAS = 400_000;
+    uint32 public constant MIN_PROCESS_MESSAGE_GAS = 100_000;
 
     /// @inheritdoc ISyncKeeperConsumer
     address public immutable CUSTOM_SENDER;
@@ -80,6 +81,9 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
 
     /// @dev The encoded CCIP fee data forwarded to `CustomSender.sync`.
     bytes private _feeOtoD;
+
+    /// @dev The encoded extra arguments forwarded to the CCIP router.
+    bytes private _extraArgs = "";
 
     /**
      * @dev Sets the immutable values cached from the `CustomSender`, and the initial thresholds,
@@ -161,6 +165,28 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         IERC20(gho).forceApprove(customSender_, type(uint256).max);
     }
 
+    /// @inheritdoc ISyncKeeperConsumer
+    function setExtraArgs(bytes calldata newExtraArgs) external onlyOwner {
+        if (newExtraArgs.length > 0) {
+            bytes4 tag = bytes4(newExtraArgs);
+            require(
+                tag == ExtraArgsCodec.GENERIC_EXTRA_ARGS_V3_TAG,
+                InvalidExtraArgsTag(tag)
+            );
+            ExtraArgsCodec.GenericExtraArgsV3 memory args = abi.decode(
+                newExtraArgs[4:],
+                (ExtraArgsCodec.GenericExtraArgsV3)
+            );
+            require(
+                args.gasLimit >= MIN_PROCESS_MESSAGE_GAS,
+                InvalidGasLimit()
+            );
+        }
+
+        _extraArgs = newExtraArgs;
+        emit ExtraArgsUpdated(newExtraArgs);
+    }
+
     /**
      * @dev Receives the native token used to pay the CCIP fee when it is not paid in `GHO`, and the
      * excess refunded by the `CustomSender` after each sync.
@@ -168,7 +194,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     receive() external payable {}
 
     /// @inheritdoc ISyncKeeperConsumer
-    function setMinGhoBalance(uint256 minBal) external override onlyOwner {
+    function setMinGhoBalance(uint256 minBal) external onlyOwner {
         require(minBal > 0, ZeroAmount());
 
         uint256 previousMinBal = minGhoBalance;
@@ -178,7 +204,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function setMinSGhoBalance(uint256 minBal) external override onlyOwner {
+    function setMinSGhoBalance(uint256 minBal) external onlyOwner {
         require(minBal > 0, ZeroAmount());
 
         uint256 previousMinBal = minSGhoBalance;
@@ -188,7 +214,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function setSyncAmount(uint256 newAmount) external override onlyOwner {
+    function setSyncAmount(uint256 newAmount) external onlyOwner {
         require(newAmount > 0, ZeroAmount());
 
         uint256 previousAmount = syncAmount;
@@ -198,7 +224,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function setMinSyncAmount(uint256 newAmount) external override onlyOwner {
+    function setMinSyncAmount(uint256 newAmount) external onlyOwner {
         require(newAmount > 0, ZeroAmount());
 
         uint256 previousAmount = minSyncAmount;
@@ -208,9 +234,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function setSettlementWindow(
-        uint256 newWindow
-    ) external override onlyOwner {
+    function setSettlementWindow(uint256 newWindow) external onlyOwner {
         uint256 previousWindow = settlementWindow;
         settlementWindow = newWindow;
 
@@ -218,13 +242,12 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function setFeeOtoD(bytes calldata newFee) external override onlyOwner {
-        bytes memory feeMem = newFee;
+    function setFeeOtoD(bytes calldata newFee) external onlyOwner {
         (
             uint128 maxFeeOtoD,
             bool payInGhoOtoD,
             uint32 gasLimitOtoD
-        ) = _decodeAndValidateFeeOtoD(feeMem);
+        ) = _decodeAndValidateFeeOtoD(newFee);
 
         _feeOtoD = newFee;
 
@@ -232,7 +255,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function setPriceFeed(address newFeed) external override onlyOwner {
+    function setPriceFeed(address newFeed) external onlyOwner {
         require(newFeed != address(0), ZeroAddress());
 
         address previousFeed = priceFeed;
@@ -242,9 +265,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function setMaxPriceStaleness(
-        uint256 newStaleness
-    ) external override onlyOwner {
+    function setMaxPriceStaleness(uint256 newStaleness) external onlyOwner {
         uint256 previousStaleness = maxPriceStaleness;
         maxPriceStaleness = newStaleness;
 
@@ -252,12 +273,17 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function feeOtoD() external view override returns (bytes memory) {
+    function feeOtoD() external view returns (bytes memory) {
         return _feeOtoD;
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function needsUpkeep() external view override returns (bool) {
+    function extraArgs() external view returns (bytes memory) {
+        return _extraArgs;
+    }
+
+    /// @inheritdoc ISyncKeeperConsumer
+    function needsUpkeep() external view returns (bool) {
         if (!_validateOracle()) return false;
 
         (uint256 ghoBalance, uint256 sGhoBalance) = _poolBalances();

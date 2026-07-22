@@ -19,6 +19,19 @@ interface ISyncKeeperConsumer {
     error FeeOtoDTooShort(uint256 length, uint256 minLength);
 
     /**
+     * @dev The gas limit encoded in the extra arguments passed to {setExtraArgs} is below
+     * {MIN_PROCESS_MESSAGE_GAS}.
+     */
+    error InvalidGasLimit();
+
+    /**
+     * @dev The first 4 bytes of the extra arguments passed to {setExtraArgs} do not match
+     * `ExtraArgsCodec.GENERIC_EXTRA_ARGS_V3_TAG`.
+     * @param tag The rejected 4-byte tag found at the start of the extra arguments.
+     */
+    error InvalidExtraArgsTag(bytes4 tag);
+
+    /**
      * @dev The gas limit encoded in the fee data is below {MIN_PROCESS_MESSAGE_GAS}.
      * @param gasLimit The gas limit encoded in the provided fee data.
      * @param minGas The minimum gas limit required to process the message.
@@ -30,6 +43,12 @@ interface ISyncKeeperConsumer {
 
     /// @dev A required amount parameter is zero.
     error ZeroAmount();
+
+    /**
+     * Emitted when the CCIP extra arguments are updated.
+     * @param extraArgs The new encoded extra arguments forwarded to the CCIP router.
+     */
+    event ExtraArgsUpdated(bytes extraArgs);
 
     /**
      * Emitted when the minimum `GHO` balance is updated.
@@ -142,6 +161,19 @@ interface ISyncKeeperConsumer {
      * is not retried; the next report proceeds once the feed recovers.
      */
     event SyncSkippedStalePrice();
+
+    /**
+     * @dev Sets the extra arguments forwarded to the CCIP router on each sync.
+     *
+     * Requirements:
+     *
+     * - `msg.sender` must be the owner.
+     *
+     * Emits an {ExtraArgsUpdated} event.
+     *
+     * @param newExtraArgs The new encoded extra arguments, or empty bytes to use the CCIP defaults.
+     */
+    function setExtraArgs(bytes calldata newExtraArgs) external;
 
     /**
      * @dev Sets the `GHO` balance below which the oracle pool is considered short of `GHO`.
@@ -328,6 +360,11 @@ interface ISyncKeeperConsumer {
      * @notice Returns the encoded CCIP fee data forwarded to `CustomSender.sync`.
      */
     function feeOtoD() external view returns (bytes memory);
+
+    /**
+     * @notice Returns the encoded extra arguments forwarded to the CCIP router.
+     */
+    function extraArgs() external view returns (bytes memory);
 
     /**
      * @dev Returns whether the oracle pool can be rebalanced right now.
