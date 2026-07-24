@@ -48,4 +48,21 @@ library ExtraArgsCodec {
         /// @dev May be empty depending on the token pool.
         bytes tokenArgs;
     }
+
+    /// @notice Creates a basic encoded GenericExtraArgsV3 with only gasLimit and finality config set.
+    /// @param gasLimit The gas limit for the callback on the destination chain.
+    /// @param finalityConfig The finality config, encoded via `FinalityCodec`.
+    /// @return encoded The encoded extra args as bytes. These are ready to be passed into CCIP functions.
+    function _getBasicEncodedExtraArgsV3(
+        uint32 gasLimit,
+        bytes4 finalityConfig
+    ) internal pure returns (bytes memory) {
+        return
+            abi.encodePacked(
+                GENERIC_EXTRA_ARGS_V3_TAG,
+                gasLimit,
+                finalityConfig,
+                bytes7(0)
+            );
+    }
 }

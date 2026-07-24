@@ -10,6 +10,7 @@ import {IERC165} from "../src/interfaces/IERC165.sol";
 import {IReceiver} from "../src/interfaces/IReceiver.sol";
 import {ISyncKeeperConsumer} from "../src/interfaces/ISyncKeeperConsumer.sol";
 import {ExtraArgsCodec} from "../src/libraries/ExtraArgsCodec.sol";
+import {FinalityCodec} from "../src/libraries/FinalityCodec.sol";
 import {MockAggregatorV3} from "./mocks/MockAggregatorV3.sol";
 import {MockCustomSender} from "./mocks/MockCustomSender.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
@@ -685,25 +686,19 @@ contract SetFeeOtoDTest is TestSyncKeeperConsumerBase {
  * @dev Run with: forge test --match-contract SetExtraArgsTest -vvv
  */
 contract SetExtraArgsTest is TestSyncKeeperConsumerBase {
-    /// @dev Builds valid GENERIC_EXTRA_ARGS_V3 extra arguments carrying `gasLimit`, with every
-    ///      other field left at its empty default.
-    function _extraArgs(uint32 gasLimit) internal pure returns (bytes memory) {
-        ExtraArgsCodec.GenericExtraArgsV3 memory args = ExtraArgsCodec
-            .GenericExtraArgsV3({
-                gasLimit: gasLimit,
-                requestedFinalityConfig: bytes4(0),
-                ccvs: new address[](0),
-                ccvArgs: new bytes[](0),
-                executor: address(0),
-                executorArgs: "",
-                tokenReceiver: "",
-                tokenArgs: ""
-            });
-
+    /// @dev Re-derives the expected GENERIC_EXTRA_ARGS_V3 packing independently of
+    ///      {ExtraArgsCodec._getBasicEncodedExtraArgsV3}, so a change to the codec's layout is caught
+    ///      here rather than masked by reusing it.
+    function _expectedExtraArgs(
+        uint32 gasLimit,
+        bytes4 finalityConfig
+    ) internal pure returns (bytes memory) {
         return
-            bytes.concat(
+            abi.encodePacked(
                 ExtraArgsCodec.GENERIC_EXTRA_ARGS_V3_TAG,
-                abi.encode(args)
+                gasLimit,
+                finalityConfig,
+                bytes7(0)
             );
     }
 
@@ -715,67 +710,71 @@ contract SetExtraArgsTest is TestSyncKeeperConsumerBase {
                 USER
             )
         );
-        consumer.setExtraArgs(hex"dead");
-    }
-
-    function testSetExtraArgsInvalidTag() public {
-        bytes memory badArgs = hex"deadbeef";
-
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                ISyncKeeperConsumer.InvalidExtraArgsTag.selector,
-                bytes4(hex"deadbeef")
-            )
-        );
-        consumer.setExtraArgs(badArgs);
-    }
-
-    /// @dev A non-empty input shorter than 4 bytes is right-padded with zeros before the tag check.
-    function testSetExtraArgsShortTag() public {
-        bytes memory badArgs = hex"dead";
-
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                ISyncKeeperConsumer.InvalidExtraArgsTag.selector,
-                bytes4(hex"dead0000")
-            )
-        );
-        consumer.setExtraArgs(badArgs);
+        consumer.setExtraArgs(GAS_LIMIT, FinalityCodec.WAIT_FOR_FINALITY_FLAG);
     }
 
     function testSetExtraArgsInsufficientGasLimit() public {
         uint32 tooLittleGas = consumer.MIN_PROCESS_MESSAGE_GAS() - 1;
 
         vm.expectRevert(ISyncKeeperConsumer.InvalidGasLimit.selector);
-        consumer.setExtraArgs(_extraArgs(tooLittleGas));
+        consumer.setExtraArgs(
+            tooLittleGas,
+            FinalityCodec.WAIT_FOR_FINALITY_FLAG
+        );
+    }
+
+    /// @dev A finality config that selects more than one mode (here a flag combined with a block
+    ///      depth) is rejected by {FinalityCodec._validateRequestedFinality}.
+    function testSetExtraArgsInvalidFinality() public {
+        bytes4 multiMode = FinalityCodec.WAIT_FOR_SAFE_FLAG | bytes4(uint32(5));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                FinalityCodec.RequestedFinalityCanOnlyHaveOneMode.selector,
+                multiMode
+            )
+        );
+        consumer.setExtraArgs(GAS_LIMIT, multiMode);
     }
 
     function testSetExtraArgsAtMinimumGasLimit() public {
-        bytes memory newArgs = _extraArgs(consumer.MIN_PROCESS_MESSAGE_GAS());
+        uint32 minGas = consumer.MIN_PROCESS_MESSAGE_GAS();
+        bytes memory expected = _expectedExtraArgs(
+            minGas,
+            FinalityCodec.WAIT_FOR_FINALITY_FLAG
+        );
 
         vm.expectEmit(true, true, true, true, address(consumer));
-        emit ISyncKeeperConsumer.ExtraArgsUpdated(newArgs);
-        consumer.setExtraArgs(newArgs);
+        emit ISyncKeeperConsumer.ExtraArgsUpdated(expected);
+        consumer.setExtraArgs(minGas, FinalityCodec.WAIT_FOR_FINALITY_FLAG);
 
-        assertEq(consumer.extraArgs(), newArgs, "minimum gas limit accepted");
+        assertEq(consumer.extraArgs(), expected, "minimum gas limit accepted");
     }
 
     function testSetExtraArgs() public {
-        bytes memory newArgs = _extraArgs(GAS_LIMIT);
+        bytes memory expected = _expectedExtraArgs(
+            GAS_LIMIT,
+            FinalityCodec.WAIT_FOR_FINALITY_FLAG
+        );
 
         vm.expectEmit(true, true, true, true, address(consumer));
-        emit ISyncKeeperConsumer.ExtraArgsUpdated(newArgs);
-        consumer.setExtraArgs(newArgs);
+        emit ISyncKeeperConsumer.ExtraArgsUpdated(expected);
+        consumer.setExtraArgs(GAS_LIMIT, FinalityCodec.WAIT_FOR_FINALITY_FLAG);
 
-        assertEq(consumer.extraArgs(), newArgs);
+        assertEq(consumer.extraArgs(), expected);
+        assertEq(consumer.extraArgs().length, 19, "packed extra args length");
     }
 
-    function testSetExtraArgsEmpty() public {
-        vm.expectEmit(true, true, true, true, address(consumer));
-        emit ISyncKeeperConsumer.ExtraArgsUpdated("");
-        consumer.setExtraArgs("");
+    /// @dev A non-default single-mode finality (a bare block depth) is encoded through unchanged.
+    function testSetExtraArgsWithBlockDepthFinality() public {
+        bytes4 blockDepth = bytes4(uint32(10));
+        bytes memory expected = _expectedExtraArgs(GAS_LIMIT, blockDepth);
 
-        assertEq(consumer.extraArgs(), "", "empty extra args accepted");
+        vm.expectEmit(true, true, true, true, address(consumer));
+        emit ISyncKeeperConsumer.ExtraArgsUpdated(expected);
+        consumer.setExtraArgs(GAS_LIMIT, blockDepth);
+
+        assertEq(consumer.extraArgs(), expected);
     }
 }
 

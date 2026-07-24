@@ -6,6 +6,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 import {ReceiverTemplate} from "./ReceiverTemplate.sol";
 import {ExtraArgsCodec} from "./libraries/ExtraArgsCodec.sol";
+import {FinalityCodec} from "./libraries/FinalityCodec.sol";
 import {IAggregatorV3} from "./interfaces/IAggregatorV3.sol";
 import {ICustomSender} from "./interfaces/ICustomSender.sol";
 import {ISyncKeeperConsumer} from "./interfaces/ISyncKeeperConsumer.sol";
@@ -165,33 +166,26 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         IERC20(gho).forceApprove(customSender_, type(uint256).max);
     }
 
-    /// @inheritdoc ISyncKeeperConsumer
-    function setExtraArgs(bytes calldata newExtraArgs) external onlyOwner {
-        if (newExtraArgs.length > 0) {
-            bytes4 tag = bytes4(newExtraArgs);
-            require(
-                tag == ExtraArgsCodec.GENERIC_EXTRA_ARGS_V3_TAG,
-                InvalidExtraArgsTag(tag)
-            );
-            ExtraArgsCodec.GenericExtraArgsV3 memory args = abi.decode(
-                newExtraArgs[4:],
-                (ExtraArgsCodec.GenericExtraArgsV3)
-            );
-            require(
-                args.gasLimit >= MIN_PROCESS_MESSAGE_GAS,
-                InvalidGasLimit()
-            );
-        }
-
-        _extraArgs = newExtraArgs;
-        emit ExtraArgsUpdated(newExtraArgs);
-    }
-
     /**
      * @dev Receives the native token used to pay the CCIP fee when it is not paid in `GHO`, and the
      * excess refunded by the `CustomSender` after each sync.
      */
     receive() external payable {}
+
+    /// @inheritdoc ISyncKeeperConsumer
+    function setExtraArgs(
+        uint32 gasLimit,
+        bytes4 finalityConfig
+    ) external onlyOwner {
+        require(gasLimit >= MIN_PROCESS_MESSAGE_GAS, InvalidGasLimit());
+        FinalityCodec._validateRequestedFinality(finalityConfig);
+
+        _extraArgs = ExtraArgsCodec._getBasicEncodedExtraArgsV3(
+            gasLimit,
+            finalityConfig
+        );
+        emit ExtraArgsUpdated(_extraArgs);
+    }
 
     /// @inheritdoc ISyncKeeperConsumer
     function setMinGhoBalance(uint256 minBal) external onlyOwner {

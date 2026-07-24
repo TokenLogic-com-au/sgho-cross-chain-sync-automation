@@ -19,17 +19,9 @@ interface ISyncKeeperConsumer {
     error FeeOtoDTooShort(uint256 length, uint256 minLength);
 
     /**
-     * @dev The gas limit encoded in the extra arguments passed to {setExtraArgs} is below
-     * {MIN_PROCESS_MESSAGE_GAS}.
+     * @dev The `gasLimit` passed to {setExtraArgs} is below {MIN_PROCESS_MESSAGE_GAS}.
      */
     error InvalidGasLimit();
-
-    /**
-     * @dev The first 4 bytes of the extra arguments passed to {setExtraArgs} do not match
-     * `ExtraArgsCodec.GENERIC_EXTRA_ARGS_V3_TAG`.
-     * @param tag The rejected 4-byte tag found at the start of the extra arguments.
-     */
-    error InvalidExtraArgsTag(bytes4 tag);
 
     /**
      * @dev The gas limit encoded in the fee data is below {MIN_PROCESS_MESSAGE_GAS}.
@@ -163,17 +155,22 @@ interface ISyncKeeperConsumer {
     event SyncSkippedStalePrice();
 
     /**
-     * @dev Sets the extra arguments forwarded to the CCIP router on each sync.
+     * @dev Sets the extra arguments forwarded to the CCIP router on each sync, built as a
+     * `GENERIC_EXTRA_ARGS_V3` payload carrying only `gasLimit` and `finalityConfig`.
      *
      * Requirements:
      *
      * - `msg.sender` must be the owner.
+     * - `gasLimit` must be at least {MIN_PROCESS_MESSAGE_GAS}.
+     * - `finalityConfig` must select a single requested-finality mode (full finality, one flag, or a
+     *   block depth), per `FinalityCodec`.
      *
      * Emits an {ExtraArgsUpdated} event.
      *
-     * @param newExtraArgs The new encoded extra arguments, or empty bytes to use the CCIP defaults.
+     * @param gasLimit The gas limit for the message callback on the destination chain.
+     * @param finalityConfig The requested finality config, encoded via `FinalityCodec`.
      */
-    function setExtraArgs(bytes calldata newExtraArgs) external;
+    function setExtraArgs(uint32 gasLimit, bytes4 finalityConfig) external;
 
     /**
      * @dev Sets the `GHO` balance below which the oracle pool is considered short of `GHO`.
