@@ -59,10 +59,19 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     uint256 public override syncAmount;
 
     /// @inheritdoc ISyncKeeperConsumer
+    uint256 public override minSyncAmount;
+
+    /// @inheritdoc ISyncKeeperConsumer
     address public override priceFeed;
 
     /// @inheritdoc ISyncKeeperConsumer
     uint256 public override maxPriceStaleness;
+
+    /// @inheritdoc ISyncKeeperConsumer
+    uint256 public override settlementWindow;
+
+    /// @inheritdoc ISyncKeeperConsumer
+    uint256 public override lastSyncAt;
 
     /// @dev The encoded CCIP fee data forwarded to `CustomSender.sync`.
     bytes private _feeOtoD;
@@ -78,9 +87,14 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      *
      * - `customSender_` and `priceFeed_` must not be the zero address.
      * - The oracle pool, `GHO` and `SGHO` of `customSender_` must not be the zero address.
-     * - `minGhoBalance_`, `minSGhoBalance_` and `syncAmount_` must be greater than 0.
+     * - `minGhoBalance_`, `minSGhoBalance_`, `syncAmount_` and `minSyncAmount_` must be greater than
+     *   0.
      * - `feeOtoD_` must be at least 96 bytes long and encode a gas limit of at least
      *   {MIN_PROCESS_MESSAGE_GAS}.
+     *
+     * `settlementWindow_` may be 0, which disables the cooldown and allows back-to-back syncs.
+     * For sensible sizing `minSyncAmount_` should be no greater than `syncAmount_`, though this is
+     * not enforced.
      *
      * @param forwarder The address of the Chainlink Forwarder contract.
      * @param customSender_ The address of the `CustomSender` contract to sync.
@@ -89,6 +103,8 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      * @param minGhoBalance_ The `GHO` balance below which the pool is considered short of `GHO`.
      * @param minSGhoBalance_ The `SGHO` balance below which the pool is considered short of `SGHO`.
      * @param syncAmount_ The maximum amount of the surplus token sent on each sync.
+     * @param minSyncAmount_ The minimum surplus above threshold required to perform a sync.
+     * @param settlementWindow_ The minimum delay between syncs, in seconds (0 disables it).
      * @param feeOtoD_ The encoded CCIP fee data.
      * @param extraArgs_ The encoded extra arguments forwarded to the CCIP router.
      */
@@ -100,6 +116,8 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         uint256 minGhoBalance_,
         uint256 minSGhoBalance_,
         uint256 syncAmount_,
+        uint256 minSyncAmount_,
+        uint256 settlementWindow_,
         bytes memory feeOtoD_,
         bytes memory extraArgs_
     ) ReceiverTemplate(forwarder) {
@@ -118,9 +136,13 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         );
 
         // A zero threshold would mean that side is never considered short, silently disabling half
-        // of the rebalance.
+        // of the rebalance. A zero `minSyncAmount_` would let a zero `sendable` slip past the floor
+        // in {_evaluatePool} and produce a zero-amount sync that `CustomSender.sync` rejects.
         require(
-            minGhoBalance_ > 0 && minSGhoBalance_ > 0 && syncAmount_ > 0,
+            minGhoBalance_ > 0 &&
+                minSGhoBalance_ > 0 &&
+                syncAmount_ > 0 &&
+                minSyncAmount_ > 0,
             ZeroAmount()
         );
 
@@ -134,6 +156,8 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         minGhoBalance = minGhoBalance_;
         minSGhoBalance = minSGhoBalance_;
         syncAmount = syncAmount_;
+        minSyncAmount = minSyncAmount_;
+        settlementWindow = settlementWindow_;
         _feeOtoD = feeOtoD_;
         _extraArgs = extraArgs_;
     }
@@ -172,6 +196,24 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         syncAmount = newAmount;
 
         emit SyncAmountUpdated(previousAmount, newAmount);
+    }
+
+    /// @inheritdoc ISyncKeeperConsumer
+    function setMinSyncAmount(uint256 newAmount) external override onlyOwner {
+        require(newAmount > 0, ZeroAmount());
+
+        uint256 previousAmount = minSyncAmount;
+        minSyncAmount = newAmount;
+
+        emit MinSyncAmountUpdated(previousAmount, newAmount);
+    }
+
+    /// @inheritdoc ISyncKeeperConsumer
+    function setSettlementWindow(uint256 newWindow) external override onlyOwner {
+        uint256 previousWindow = settlementWindow;
+        settlementWindow = newWindow;
+
+        emit SettlementWindowUpdated(previousWindow, newWindow);
     }
 
     /// @inheritdoc ISyncKeeperConsumer
@@ -232,9 +274,22 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         if (!_validateOracle()) return false;
 
         (uint256 ghoBalance, uint256 sGhoBalance) = _poolBalances();
-        (address surplusToken, ) = _evaluatePool(ghoBalance, sGhoBalance);
+        (address surplusToken, uint256 sendable) = _evaluatePool(
+            ghoBalance,
+            sGhoBalance
+        );
+        if (surplusToken == address(0)) return false;
 
-        return surplusToken != address(0);
+        // The previous sync's return leg is still settling over CCIP during the window, so signal
+        // no upkeep to avoid stacking corrections on a not-yet-refilled pool.
+        if (_inCooldown()) return false;
+
+        // Apply the same price gate the executor applies, so the gate never signals a sync that
+        // {_processReport} would skip on a stale or invalid feed.
+        uint256 amount = syncAmount < sendable ? syncAmount : sendable;
+        (bool ok, ) = _quote(surplusToken, amount);
+
+        return ok;
     }
 
     /**
@@ -246,10 +301,21 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      *
      * The amount sent is {syncAmount} capped at what the surplus side holds above its own
      * threshold, so that `OraclePool.pull` can never revert for insufficient balance and a sync can
-     * never flip the shortage over to the side it drew from.
+     * never flip the shortage over to the side it drew from. A surplus smaller than {minSyncAmount}
+     * is not worth a CCIP fee, so {_evaluatePool} reports no surplus and the call skips.
+     *
+     * The counter-token received in exchange returns on a later, asynchronous CCIP message that is
+     * invisible to the pool balances read here. To avoid stacking corrections on a pool that has not
+     * yet been refilled, a sync starts a {settlementWindow} cooldown during which further reports
+     * emit {SyncSkippedCooldown} and return.
+     *
+     * A stale or invalid price feed is treated as another unactionable state: the call emits
+     * {SyncSkippedStalePrice} and returns instead of reverting, so that the report is not retried
+     * while the feed is down. This mirrors {needsUpkeep}, which applies the same checks.
      *
      * Emits a {SyncPerformed} event, or a {SyncSkippedOracleMisconfigured},
-     * {SyncSkippedUpkeepNotNeeded} or {SyncSkippedNoSurplus} event if no sync is performed.
+     * {SyncSkippedUpkeepNotNeeded}, {SyncSkippedNoSurplus}, {SyncSkippedCooldown} or
+     * {SyncSkippedStalePrice} event if no sync is performed.
      */
     function _processReport(bytes calldata /* report */) internal override {
         if (!_validateOracle()) {
@@ -272,16 +338,27 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
             return;
         }
 
+        if (_inCooldown()) {
+            emit SyncSkippedCooldown(lastSyncAt, settlementWindow);
+            return;
+        }
+
         uint256 amount = syncAmount;
         if (amount > sendable) amount = sendable;
 
-        uint256 minAmountOut = _computeMinAmountOut(surplusToken, amount);
+        (bool ok, uint256 minAmountOut) = _quote(surplusToken, amount);
+        if (!ok) {
+            emit SyncSkippedStalePrice();
+            return;
+        }
 
         bytes memory feeMem = _feeOtoD;
         (uint128 maxFeeOtoD, bool payInGhoOtoD, ) = _decodeAndValidateFeeOtoD(
             feeMem
         );
         uint256 nativeAmount = payInGhoOtoD ? 0 : uint256(maxFeeOtoD);
+
+        lastSyncAt = block.timestamp;
 
         ICustomSender(CUSTOM_SENDER).sync{value: nativeAmount}(
             surplusToken,
@@ -313,8 +390,9 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      * deficit. When neither is short there is nothing to correct.
      *
      * Only the balance the surplus side holds *above its own threshold* may be sent, so a sync can
-     * never draw that side through its floor and flip the shortage over to it. A side sitting
-     * exactly on its threshold therefore has nothing to send, and no sync is possible.
+     * never draw that side through its floor and flip the shortage over to it. A surplus below
+     * {minSyncAmount} does not justify a fixed CCIP fee, so it is treated as no surplus; this also
+     * keeps the amount strictly positive, since {minSyncAmount} is non-zero.
      *
      * @param ghoBalance The current `GHO` balance of the oracle pool.
      * @param sGhoBalance The current `SGHO` balance of the oracle pool.
@@ -337,9 +415,21 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
             ? sGhoBalance - minSGhoBalance
             : ghoBalance - minGhoBalance;
 
-        if (sendable == 0) return (address(0), 0);
+        if (sendable < minSyncAmount) return (address(0), 0);
 
         return (surplusToken, sendable);
+    }
+
+    /**
+     * @dev Returns whether a prior sync is still within its {settlementWindow} cooldown.
+     * The counter-token from that sync is still settling over CCIP, so the pool balances do not yet
+     * reflect it. `lastSyncAt` is never in the future, so the subtraction cannot underflow, and a
+     * zero {settlementWindow} makes this always false, disabling the cooldown.
+     *
+     * @return True if the cooldown has not yet elapsed.
+     */
+    function _inCooldown() private view returns (bool) {
+        return block.timestamp - lastSyncAt < settlementWindow;
     }
 
     /**
@@ -394,34 +484,40 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      * `GHO` divides by the rate to get `SGHO` shares, sending `SGHO` multiplies by it to get `GHO`
      * assets.
      *
-     * Requirements:
-     *
-     * - The feed answer must be greater than 0.
-     * - The feed must have been updated at most {maxPriceStaleness} seconds ago.
+     * The price feed is the single precondition that {needsUpkeep} cannot check by reading balances
+     * alone, so it is validated here and this helper is shared by both the gate and the executor:
+     * the gate calls it to avoid signalling a sync the executor would skip, and the executor calls
+     * it to decide between performing the sync and emitting {SyncSkippedStalePrice}. Because both
+     * callers run identical logic, the gate and the executor cannot disagree on whether a sync is
+     * possible. A feed answer that is non-positive, stale, or timestamped in the future yields
+     * `ok == false` rather than a revert, upholding the no-revert-so-no-retry design.
      *
      * @param tokenIn The address of the token being sent, either `GHO` or `SGHO`.
      * @param amountIn The amount of `tokenIn` being sent.
-     * @return The equivalent amount of the opposite token.
+     * @return ok Whether the feed answer is usable (positive and within {maxPriceStaleness}).
+     * @return minAmountOut The equivalent amount of the opposite token, or 0 when `ok` is false.
      */
-    function _computeMinAmountOut(
+    function _quote(
         address tokenIn,
         uint256 amountIn
-    ) private view returns (uint256) {
+    ) private view returns (bool ok, uint256 minAmountOut) {
         IAggregatorV3 feed = IAggregatorV3(priceFeed);
         (, int256 answer, , uint256 updatedAt, ) = feed.latestRoundData();
 
-        require(answer > 0, InvalidPrice(answer));
-        require(
-            block.timestamp - updatedAt <= maxPriceStaleness,
-            StalePriceFeed(updatedAt, maxPriceStaleness)
-        );
+        if (answer <= 0) return (false, 0);
+        if (
+            updatedAt > block.timestamp ||
+            block.timestamp - updatedAt > maxPriceStaleness
+        ) {
+            return (false, 0);
+        }
 
         uint256 rate = uint256(answer);
         uint256 scale = 10 ** feed.decimals();
 
-        return
-            tokenIn == GHO
-                ? (amountIn * scale) / rate
-                : (amountIn * rate) / scale;
+        minAmountOut = tokenIn == GHO
+            ? (amountIn * scale) / rate
+            : (amountIn * rate) / scale;
+        ok = true;
     }
 }
