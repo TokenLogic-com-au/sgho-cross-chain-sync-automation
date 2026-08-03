@@ -151,7 +151,10 @@ contract TestSyncKeeperConsumerBase is Test {
         uint256 ghoAmount,
         int256 answer
     ) internal view returns (uint256) {
-        return _applySlippage((ghoAmount * (10 ** FEED_DECIMALS)) / uint256(answer));
+        return
+            _applySlippage(
+                (ghoAmount * (10 ** FEED_DECIMALS)) / uint256(answer)
+            );
     }
 
     /// @dev Sending sGHO returns GHO assets: multiply by the GHO-per-share rate, then apply slippage.
@@ -159,7 +162,10 @@ contract TestSyncKeeperConsumerBase is Test {
         uint256 sGhoAmount,
         int256 answer
     ) internal view returns (uint256) {
-        return _applySlippage((sGhoAmount * uint256(answer)) / (10 ** FEED_DECIMALS));
+        return
+            _applySlippage(
+                (sGhoAmount * uint256(answer)) / (10 ** FEED_DECIMALS)
+            );
     }
 }
 
@@ -856,9 +862,7 @@ contract SetSlippageToleranceTest is TestSyncKeeperConsumerBase {
     }
 
     function testSetSlippageToleranceTooHigh() public {
-        vm.expectRevert(
-            ISyncKeeperConsumer.InvalidSlippageTolerance.selector
-        );
+        vm.expectRevert(ISyncKeeperConsumer.InvalidSlippageTolerance.selector);
         consumer.setSlippageTolerance(10_000 + 1);
     }
 
@@ -1231,11 +1235,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         _submitReport();
 
         assertEq(swapHandler.syncCallCount(), 1, "sync count");
-        assertEq(
-            swapHandler.lastValue(),
-            0,
-            "no native value when paying GHO"
-        );
+        assertEq(swapHandler.lastValue(), 0, "no native value when paying GHO");
         assertEq(gho.balanceOf(address(consumer)), 0, "GHO fee pulled");
         assertEq(
             gho.balanceOf(address(swapHandler)),

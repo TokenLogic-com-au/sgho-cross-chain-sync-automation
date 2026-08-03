@@ -115,6 +115,10 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      * For sensible sizing `minSyncAmount_` should be no greater than `syncAmount_`, though this is
      * not enforced.
      *
+     * `settlementWindow_` may be 0, which disables the cooldown and allows back-to-back syncs.
+     * For sensible sizing `minSyncAmount_` should be no greater than `syncAmount_`, though this is
+     * not enforced.
+     *
      * @param forwarder The address of the Chainlink Forwarder contract.
      * @param expectedAuthor_ The address of the workflow owner whose reports are accepted.
      * @param swapHandler_ The address of the `SwapHandler` contract to sync.
@@ -581,8 +585,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
 
         uint256 minAmountOut = (expectedOut *
             (MAX_BPS - slippageToleranceBps)) / MAX_BPS;
-        bool ok = true;
 
-        return (ok, minAmountOut);
+        return (true, minAmountOut);
     }
 }
