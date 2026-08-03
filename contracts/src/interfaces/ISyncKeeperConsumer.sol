@@ -79,12 +79,6 @@ interface ISyncKeeperConsumer {
     );
 
     /**
-     * Emitted when the CCIP extra arguments are updated.
-     * @param extraArgs The new encoded extra arguments forwarded to the CCIP router.
-     */
-    event ExtraArgsUpdated(bytes extraArgs);
-
-    /**
      * Emitted when the price feed is updated.
      * @param previous The address of the previous price feed.
      * @param current The address of the new price feed.
@@ -243,19 +237,6 @@ interface ISyncKeeperConsumer {
     function setFeeOtoD(bytes calldata newFee) external;
 
     /**
-     * @dev Sets the extra arguments forwarded to the CCIP router on each sync.
-     *
-     * Requirements:
-     *
-     * - `msg.sender` must be the owner.
-     *
-     * Emits an {ExtraArgsUpdated} event.
-     *
-     * @param newExtraArgs The new encoded extra arguments, or empty bytes to use the CCIP defaults.
-     */
-    function setExtraArgs(bytes calldata newExtraArgs) external;
-
-    /**
      * @dev Sets the price feed used to convert the synced amount to the opposite token.
      *
      * Requirements:
@@ -347,11 +328,6 @@ interface ISyncKeeperConsumer {
      * @notice Returns the encoded CCIP fee data forwarded to `CustomSender.sync`.
      */
     function feeOtoD() external view returns (bytes memory);
-
-    /**
-     * @notice Returns the encoded extra arguments forwarded to the CCIP router.
-     */
-    function extraArgs() external view returns (bytes memory);
 
     /**
      * @dev Returns whether the oracle pool can be rebalanced right now.

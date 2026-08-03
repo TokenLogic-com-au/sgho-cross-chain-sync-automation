@@ -11,7 +11,7 @@ This code illustrates how to use Chainlink CRE and related on-chain interfaces. 
 Neither Chainlink Labs, the Chainlink Foundation, nor Chainlink node operators are responsible for unintended outcomes due to errors in this example or in how it is deployed or operated.
 
 
-Example automation for topping up an oracle pool via cross-chain sync: a **Chainlink CRE** TypeScript workflow reads an on-chain **keeper-style** gate and, when needed, submits a signed report so **`SyncKeeperConsumer`** calls **`CustomSender.sync`** (CCIP-related parameters live on the consumer contract).
+Example automation for rebalancing a **two-sided oracle pool** via cross-chain sync: a **Chainlink CRE** TypeScript workflow reads an on-chain **keeper-style** gate and, when one side of the pool (`GHO` or `SGHO`) runs short, submits a signed report so **`SyncKeeperConsumer`** sends the **surplus** token to the mainnet vault through **`CustomSender.sync`** and receives the short token back. All sync parameters (thresholds, amounts, price feed, CCIP fee) live on the consumer contract; the CRE report body is empty and ignored.
 
 This repository is intended as **integration reference**, not a turnkey production deployment.
 
@@ -21,7 +21,7 @@ This repository is intended as **integration reference**, not a turnkey producti
 
 | Path | Contents |
 |------|----------|
-| [`contracts/`](contracts/) | Foundry Solidity: `SyncKeeperConsumer`, vendored `ReceiverTemplate`, interfaces (`ICustomSender`, `IReceiver`). |
+| [`contracts/`](contracts/) | Foundry Solidity: `SyncKeeperConsumer`, vendored `ReceiverTemplate`, interfaces (`ICustomSender`, `IReceiver`, `IAggregatorV3`, `ISyncKeeperConsumer`), and tests. |
 | [`cross-chain-sync/`](cross-chain-sync/) | CRE workflow (`main.ts`, `evm.ts`, `config.ts`), workflow config JSON, tests. |
 | [`project.yaml`](project.yaml) | CRE project settings (RPCs, staging/production targets). |
 
@@ -40,11 +40,12 @@ This repository is intended as **integration reference**, not a turnkey producti
 ## Security and operations
 
 - **Forwarder** — `ReceiverTemplate` restricts `onReport` to the configured Chainlink Keystone forwarder; deploy with the correct forwarder for your chain ([forwarder directory](https://docs.chain.link/cre/guides/workflow/using-evm-client/forwarder-directory)).
-- **Ownership** — Owner-only setters on the consumer adjust thresholds, sync amount, and fee blob; protect owner keys.
+- **Workflow author** — The consumer pins the expected workflow owner (`expectedAuthor`) at construction, so a different workflow sharing the same forwarder cannot trigger a sync. It can be changed by the owner but should never be cleared.
+- **Ownership** — Owner-only setters on the consumer adjust the per-token thresholds, sync amounts, settlement window, price feed, and fee blob; protect owner keys.
 - **`SYNC_ROLE`** — The consumer must be granted whatever role your `CustomSender` requires to call `sync`.
-- **Threshold and CCIP params** — `minOraclePoolBalance`, destination selector, `syncAmount`, and `feeOtoD` are set on-chain (not only in workflow JSON). Align operator runbooks with [`cross-chain-sync/README.md`](cross-chain-sync/README.md).
+- **Rebalance params** — `minGhoBalance`, `minSGhoBalance`, `syncAmount`, `minSyncAmount`, `settlementWindow`, `priceFeed`, `maxPriceStaleness`, and `feeOtoD` are set on-chain (not in workflow JSON). Align operator runbooks with [`cross-chain-sync/README.md`](cross-chain-sync/README.md).
 
-**Duplicate rebalance (for Aave review):** `needsUpkeep()` stays true while the oracle pool GHO balance is **below** `minOraclePoolBalance`, so each cron tick can submit another `writeReport` / `sync` until that gate clears—often back-to-back if CCIP or settlement is slow. Outcomes also depend on **`CustomSender.sync`** (e.g. full `syncAmount` vs revert when liquidity is tight). We acknowledge this; we **did not** add a time-based cooldown on the consumer because real flows are **unpredictable** and a fixed gate could block legitimate top-ups—operators should tune cron, thresholds, and `syncAmount` instead.
+**Repeated rebalance (for Aave review):** `needsUpkeep()` stays true while one side of the pool is short (and the other holds a surplus to send), so in principle each cron tick could submit another `writeReport` / `sync`. The consumer bounds this in three ways: the token received in exchange returns on a **later, asynchronous CCIP message** invisible to the current pool balances, so a **`settlementWindow` cooldown** blocks further syncs until that return should have settled (set `settlementWindow = 0` to disable it if your flow tolerates back-to-back syncs); a **`minSyncAmount` floor** stops a dust imbalance from spending a full CCIP fee; and the amount sent is always capped at the surplus **above the sending side's own threshold**, so a sync can never flip the shortage to the other side. `needsUpkeep()` and the on-chain executor run the **same** checks (balances, cooldown, price freshness), so the gate never signals a sync the executor would then skip. Outcomes still depend on **`CustomSender.sync`** (e.g. available liquidity); operators tune cron, thresholds, `syncAmount`, and `settlementWindow` to their flow.
 
 ---
 
