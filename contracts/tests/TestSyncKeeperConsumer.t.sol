@@ -9,8 +9,11 @@ import {SyncKeeperConsumer} from "../src/SyncKeeperConsumer.sol";
 import {IERC165} from "../src/interfaces/IERC165.sol";
 import {IReceiver} from "../src/interfaces/IReceiver.sol";
 import {ISyncKeeperConsumer} from "../src/interfaces/ISyncKeeperConsumer.sol";
+import {ExtraArgsCodec} from "../src/libraries/ExtraArgsCodec.sol";
+import {FeeCodec} from "../src/libraries/FeeCodec.sol";
+import {FinalityCodec} from "../src/libraries/FinalityCodec.sol";
 import {MockAggregatorV3} from "./mocks/MockAggregatorV3.sol";
-import {MockCustomSender} from "./mocks/MockCustomSender.sol";
+import {MockSwapHandler} from "./mocks/MockSwapHandler.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 
 /**
@@ -44,7 +47,7 @@ contract TestSyncKeeperConsumerBase is Test {
 
     MockERC20 internal gho;
     MockERC20 internal sGho;
-    MockCustomSender internal customSender;
+    MockSwapHandler internal swapHandler;
     MockAggregatorV3 internal feed;
     SyncKeeperConsumer internal consumer;
 
@@ -54,7 +57,7 @@ contract TestSyncKeeperConsumerBase is Test {
 
         gho = new MockERC20("GHO", "GHO");
         sGho = new MockERC20("Staked GHO", "sGHO");
-        customSender = new MockCustomSender(
+        swapHandler = new MockSwapHandler(
             address(gho),
             address(sGho),
             ORACLE_POOL
@@ -72,7 +75,7 @@ contract TestSyncKeeperConsumerBase is Test {
         bool payInGho,
         uint32 gasLimit
     ) internal pure returns (bytes memory) {
-        return abi.encode(maxFee, payInGho, gasLimit);
+        return FeeCodec.encodeCCIP(maxFee, payInGho, gasLimit);
     }
 
     /// @dev The default fee data pays the CCIP fee in native token.
@@ -85,7 +88,7 @@ contract TestSyncKeeperConsumerBase is Test {
             new SyncKeeperConsumer(
                 FORWARDER,
                 EXPECTED_AUTHOR,
-                address(customSender),
+                address(swapHandler),
                 address(feed),
                 MAX_PRICE_STALENESS,
                 MIN_GHO_BALANCE,
@@ -138,20 +141,25 @@ contract TestSyncKeeperConsumerBase is Test {
         consumer.onReport(_metadata(EXPECTED_AUTHOR), "");
     }
 
-    /// @dev Sending GHO returns sGHO shares: divide by the GHO-per-share rate.
+    /// @dev Reduces `amount` by the consumer's slippage tolerance, matching {SyncKeeperConsumer._quote}.
+    function _applySlippage(uint256 amount) internal view returns (uint256) {
+        return (amount * (10_000 - consumer.slippageToleranceBps())) / 10_000;
+    }
+
+    /// @dev Sending GHO returns sGHO shares: divide by the GHO-per-share rate, then apply slippage.
     function _expectedSGhoOut(
         uint256 ghoAmount,
         int256 answer
-    ) internal pure returns (uint256) {
-        return (ghoAmount * (10 ** FEED_DECIMALS)) / uint256(answer);
+    ) internal view returns (uint256) {
+        return _applySlippage((ghoAmount * (10 ** FEED_DECIMALS)) / uint256(answer));
     }
 
-    /// @dev Sending sGHO returns GHO assets: multiply by the GHO-per-share rate.
+    /// @dev Sending sGHO returns GHO assets: multiply by the GHO-per-share rate, then apply slippage.
     function _expectedGhoOut(
         uint256 sGhoAmount,
         int256 answer
-    ) internal pure returns (uint256) {
-        return (sGhoAmount * uint256(answer)) / (10 ** FEED_DECIMALS);
+    ) internal view returns (uint256) {
+        return _applySlippage((sGhoAmount * uint256(answer)) / (10 ** FEED_DECIMALS));
     }
 }
 
@@ -165,7 +173,7 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
     ///      fee data, so each test isolates one invalid input.
     function _deploy(
         address forwarder,
-        address customSender_,
+        address swapHandler_,
         address priceFeed_,
         uint256 minGho,
         uint256 minSGho,
@@ -177,7 +185,7 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
             new SyncKeeperConsumer(
                 forwarder,
                 EXPECTED_AUTHOR,
-                customSender_,
+                swapHandler_,
                 priceFeed_,
                 MAX_PRICE_STALENESS,
                 minGho,
@@ -194,7 +202,7 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         new SyncKeeperConsumer(
             FORWARDER,
             address(0),
-            address(customSender),
+            address(swapHandler),
             address(feed),
             MAX_PRICE_STALENESS,
             MIN_GHO_BALANCE,
@@ -210,7 +218,7 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         vm.expectRevert(IReceiver.InvalidForwarderAddress.selector);
         _deploy(
             address(0),
-            address(customSender),
+            address(swapHandler),
             address(feed),
             MIN_GHO_BALANCE,
             MIN_SGHO_BALANCE,
@@ -220,7 +228,7 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         );
     }
 
-    function testConstructorZeroAddressCustomSender() public {
+    function testConstructorZeroAddressSwapHandler() public {
         vm.expectRevert(ISyncKeeperConsumer.ZeroAddress.selector);
         _deploy(
             FORWARDER,
@@ -238,7 +246,7 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         vm.expectRevert(ISyncKeeperConsumer.ZeroAddress.selector);
         _deploy(
             FORWARDER,
-            address(customSender),
+            address(swapHandler),
             address(0),
             MIN_GHO_BALANCE,
             MIN_SGHO_BALANCE,
@@ -249,21 +257,21 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
     }
 
     function testConstructorZeroAddressOraclePool() public {
-        customSender.setOraclePool(address(0));
+        swapHandler.setOraclePool(address(0));
 
         vm.expectRevert(ISyncKeeperConsumer.ZeroAddress.selector);
         _deployConsumer();
     }
 
     function testConstructorZeroAddressGho() public {
-        customSender.setGho(address(0));
+        swapHandler.setGho(address(0));
 
         vm.expectRevert(ISyncKeeperConsumer.ZeroAddress.selector);
         _deployConsumer();
     }
 
     function testConstructorZeroAddressSGho() public {
-        customSender.setSGho(address(0));
+        swapHandler.setSGho(address(0));
 
         vm.expectRevert(ISyncKeeperConsumer.ZeroAddress.selector);
         _deployConsumer();
@@ -273,7 +281,7 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         vm.expectRevert(ISyncKeeperConsumer.ZeroAmount.selector);
         _deploy(
             FORWARDER,
-            address(customSender),
+            address(swapHandler),
             address(feed),
             0,
             MIN_SGHO_BALANCE,
@@ -287,7 +295,7 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         vm.expectRevert(ISyncKeeperConsumer.ZeroAmount.selector);
         _deploy(
             FORWARDER,
-            address(customSender),
+            address(swapHandler),
             address(feed),
             MIN_GHO_BALANCE,
             0,
@@ -301,7 +309,7 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         vm.expectRevert(ISyncKeeperConsumer.ZeroAmount.selector);
         _deploy(
             FORWARDER,
-            address(customSender),
+            address(swapHandler),
             address(feed),
             MIN_GHO_BALANCE,
             MIN_SGHO_BALANCE,
@@ -315,7 +323,7 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         vm.expectRevert(ISyncKeeperConsumer.ZeroAmount.selector);
         _deploy(
             FORWARDER,
-            address(customSender),
+            address(swapHandler),
             address(feed),
             MIN_GHO_BALANCE,
             MIN_SGHO_BALANCE,
@@ -325,19 +333,19 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         );
     }
 
-    function testConstructorFeeOtoDTooShort() public {
-        bytes memory shortFee = abi.encode(MAX_FEE, false);
+    function testConstructorFeeDataTooShort() public {
+        bytes memory shortFee = abi.encodePacked(MAX_FEE);
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                ISyncKeeperConsumer.FeeOtoDTooShort.selector,
+                FeeCodec.FeeCodecInvalidDataLength.selector,
                 shortFee.length,
-                96
+                21
             )
         );
         _deploy(
             FORWARDER,
-            address(customSender),
+            address(swapHandler),
             address(feed),
             MIN_GHO_BALANCE,
             MIN_SGHO_BALANCE,
@@ -348,18 +356,19 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
     }
 
     function testConstructorInsufficientGasLimit() public {
-        uint32 tooLittleGas = 400_000 - 1;
+        uint32 minGas = consumer.MIN_PROCESS_MESSAGE_GAS();
+        uint32 tooLittleGas = minGas - 1;
 
         vm.expectRevert(
             abi.encodeWithSelector(
                 ISyncKeeperConsumer.InsufficientGasLimit.selector,
                 tooLittleGas,
-                400_000
+                minGas
             )
         );
         _deploy(
             FORWARDER,
-            address(customSender),
+            address(swapHandler),
             address(feed),
             MIN_GHO_BALANCE,
             MIN_SGHO_BALANCE,
@@ -377,7 +386,7 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         assertEq(c.getForwarderAddress(), FORWARDER, "forwarder");
         assertEq(c.getExpectedAuthor(), EXPECTED_AUTHOR, "expectedAuthor");
         assertEq(c.owner(), address(this), "owner");
-        assertEq(c.CUSTOM_SENDER(), address(customSender), "customSender");
+        assertEq(c.SWAP_HANDLER(), address(swapHandler), "swapHandler");
         assertEq(c.GHO(), address(gho), "gho");
         assertEq(c.SGHO(), address(sGho), "sGho");
         assertEq(c.priceFeed(), address(feed), "priceFeed");
@@ -387,8 +396,9 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         assertEq(c.syncAmount(), SYNC_AMOUNT, "syncAmount");
         assertEq(c.minSyncAmount(), MIN_SYNC_AMOUNT, "minSyncAmount");
         assertEq(c.settlementWindow(), SETTLEMENT_WINDOW, "settlementWindow");
+        assertEq(c.slippageToleranceBps(), 200, "slippageToleranceBps");
         assertEq(c.lastSyncAt(), 0, "lastSyncAt");
-        assertEq(c.feeOtoD(), _defaultFeeData(), "feeOtoD");
+        assertEq(c.feeData(), _defaultFeeData(), "feeData");
         assertEq(c.MIN_PROCESS_MESSAGE_GAS(), 400_000, "minProcessMessageGas");
     }
 
@@ -396,7 +406,7 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
     ///      do not affect an already deployed consumer.
     function testConstructorCachesTokensFromSender() public {
         SyncKeeperConsumer c = _deployConsumer();
-        customSender.setGho(makeAddr("otherGho"));
+        swapHandler.setGho(makeAddr("otherGho"));
 
         assertEq(c.GHO(), address(gho), "gho stays cached");
     }
@@ -614,12 +624,12 @@ contract SetSettlementWindowTest is TestSyncKeeperConsumerBase {
 }
 
 /**
- * @title SetFeeOtoDTest
- * @notice Unit tests for SyncKeeperConsumer.setFeeOtoD
- * @dev Run with: forge test --match-contract SetFeeOtoDTest -vvv
+ * @title SetFeeDataTest
+ * @notice Unit tests for SyncKeeperConsumer.setFeeData
+ * @dev Run with: forge test --match-contract SetFeeDataTest -vvv
  */
-contract SetFeeOtoDTest is TestSyncKeeperConsumerBase {
-    function testSetFeeOtoDNonOwner() public {
+contract SetFeeDataTest is TestSyncKeeperConsumerBase {
+    function testSetFeeDataNonOwner() public {
         vm.prank(USER);
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -627,51 +637,140 @@ contract SetFeeOtoDTest is TestSyncKeeperConsumerBase {
                 USER
             )
         );
-        consumer.setFeeOtoD(_defaultFeeData());
+        consumer.setFeeData(MAX_FEE, false, GAS_LIMIT);
     }
 
-    function testSetFeeOtoDTooShort() public {
-        bytes memory shortFee = abi.encode(MAX_FEE, false);
-
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                ISyncKeeperConsumer.FeeOtoDTooShort.selector,
-                shortFee.length,
-                96
-            )
-        );
-        consumer.setFeeOtoD(shortFee);
-    }
-
-    function testSetFeeOtoDInsufficientGasLimit() public {
-        uint32 tooLittleGas = 400_000 - 1;
+    function testSetFeeDataInsufficientGasLimit() public {
+        uint32 minGas = consumer.MIN_PROCESS_MESSAGE_GAS();
+        uint32 tooLittleGas = minGas - 1;
 
         vm.expectRevert(
             abi.encodeWithSelector(
                 ISyncKeeperConsumer.InsufficientGasLimit.selector,
                 tooLittleGas,
-                400_000
+                minGas
             )
         );
-        consumer.setFeeOtoD(_feeData(MAX_FEE, false, tooLittleGas));
+        consumer.setFeeData(MAX_FEE, false, tooLittleGas);
     }
 
-    function testSetFeeOtoDAtMinimumGasLimit() public {
-        bytes memory newFee = _feeData(MAX_FEE, false, 400_000);
-        consumer.setFeeOtoD(newFee);
+    function testSetFeeDataAtMinimumGasLimit() public {
+        uint32 minGas = consumer.MIN_PROCESS_MESSAGE_GAS();
+        consumer.setFeeData(MAX_FEE, false, minGas);
 
-        assertEq(consumer.feeOtoD(), newFee, "minimum gas limit accepted");
+        assertEq(
+            consumer.feeData(),
+            _feeData(MAX_FEE, false, minGas),
+            "minimum gas limit accepted"
+        );
     }
 
-    function testSetFeeOtoD() public {
+    function testSetFeeData() public {
         uint128 newMaxFee = 2 ether;
-        bytes memory newFee = _feeData(newMaxFee, true, GAS_LIMIT);
 
         vm.expectEmit(true, true, true, true, address(consumer));
-        emit ISyncKeeperConsumer.FeeOtoDUpdated(newMaxFee, true, GAS_LIMIT);
-        consumer.setFeeOtoD(newFee);
+        emit ISyncKeeperConsumer.FeeDataUpdated(newMaxFee, true, GAS_LIMIT);
+        consumer.setFeeData(newMaxFee, true, GAS_LIMIT);
 
-        assertEq(consumer.feeOtoD(), newFee);
+        assertEq(consumer.feeData(), _feeData(newMaxFee, true, GAS_LIMIT));
+    }
+}
+
+/**
+ * @title SetExtraArgsTest
+ * @notice Unit tests for SyncKeeperConsumer.setExtraArgs
+ * @dev Run with: forge test --match-contract SetExtraArgsTest -vvv
+ */
+contract SetExtraArgsTest is TestSyncKeeperConsumerBase {
+    /// @dev Re-derives the expected GENERIC_EXTRA_ARGS_V3 packing independently of
+    ///      {ExtraArgsCodec._getBasicEncodedExtraArgsV3}, so a change to the codec's layout is caught
+    ///      here rather than masked by reusing it.
+    function _expectedExtraArgs(
+        uint32 gasLimit,
+        bytes4 finalityConfig
+    ) internal pure returns (bytes memory) {
+        return
+            abi.encodePacked(
+                ExtraArgsCodec.GENERIC_EXTRA_ARGS_V3_TAG,
+                gasLimit,
+                finalityConfig,
+                bytes7(0)
+            );
+    }
+
+    function testSetExtraArgsNonOwner() public {
+        vm.prank(USER);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                Ownable.OwnableUnauthorizedAccount.selector,
+                USER
+            )
+        );
+        consumer.setExtraArgs(GAS_LIMIT, FinalityCodec.WAIT_FOR_FINALITY_FLAG);
+    }
+
+    function testSetExtraArgsInsufficientGasLimit() public {
+        uint32 tooLittleGas = consumer.MIN_PROCESS_MESSAGE_GAS() - 1;
+
+        vm.expectRevert(ISyncKeeperConsumer.InvalidGasLimit.selector);
+        consumer.setExtraArgs(
+            tooLittleGas,
+            FinalityCodec.WAIT_FOR_FINALITY_FLAG
+        );
+    }
+
+    /// @dev A finality config that selects more than one mode (here a flag combined with a block
+    ///      depth) is rejected by {FinalityCodec._validateRequestedFinality}.
+    function testSetExtraArgsInvalidFinality() public {
+        bytes4 multiMode = FinalityCodec.WAIT_FOR_SAFE_FLAG | bytes4(uint32(5));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                FinalityCodec.RequestedFinalityCanOnlyHaveOneMode.selector,
+                multiMode
+            )
+        );
+        consumer.setExtraArgs(GAS_LIMIT, multiMode);
+    }
+
+    function testSetExtraArgsAtMinimumGasLimit() public {
+        uint32 minGas = consumer.MIN_PROCESS_MESSAGE_GAS();
+        bytes memory expected = _expectedExtraArgs(
+            minGas,
+            FinalityCodec.WAIT_FOR_FINALITY_FLAG
+        );
+
+        vm.expectEmit(true, true, true, true, address(consumer));
+        emit ISyncKeeperConsumer.ExtraArgsUpdated(expected);
+        consumer.setExtraArgs(minGas, FinalityCodec.WAIT_FOR_FINALITY_FLAG);
+
+        assertEq(consumer.extraArgs(), expected, "minimum gas limit accepted");
+    }
+
+    function testSetExtraArgs() public {
+        bytes memory expected = _expectedExtraArgs(
+            GAS_LIMIT,
+            FinalityCodec.WAIT_FOR_FINALITY_FLAG
+        );
+
+        vm.expectEmit(true, true, true, true, address(consumer));
+        emit ISyncKeeperConsumer.ExtraArgsUpdated(expected);
+        consumer.setExtraArgs(GAS_LIMIT, FinalityCodec.WAIT_FOR_FINALITY_FLAG);
+
+        assertEq(consumer.extraArgs(), expected);
+        assertEq(consumer.extraArgs().length, 19, "packed extra args length");
+    }
+
+    /// @dev A non-default single-mode finality (a bare block depth) is encoded through unchanged.
+    function testSetExtraArgsWithBlockDepthFinality() public {
+        bytes4 blockDepth = bytes4(uint32(10));
+        bytes memory expected = _expectedExtraArgs(GAS_LIMIT, blockDepth);
+
+        vm.expectEmit(true, true, true, true, address(consumer));
+        emit ISyncKeeperConsumer.ExtraArgsUpdated(expected);
+        consumer.setExtraArgs(GAS_LIMIT, blockDepth);
+
+        assertEq(consumer.extraArgs(), expected);
     }
 }
 
@@ -740,6 +839,62 @@ contract SetMaxPriceStalenessTest is TestSyncKeeperConsumerBase {
 }
 
 /**
+ * @title SetSlippageToleranceTest
+ * @notice Unit tests for SyncKeeperConsumer.setSlippageTolerance
+ * @dev Run with: forge test --match-contract SetSlippageToleranceTest -vvv
+ */
+contract SetSlippageToleranceTest is TestSyncKeeperConsumerBase {
+    function testSetSlippageToleranceNonOwner() public {
+        vm.prank(USER);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                Ownable.OwnableUnauthorizedAccount.selector,
+                USER
+            )
+        );
+        consumer.setSlippageTolerance(100);
+    }
+
+    function testSetSlippageToleranceTooHigh() public {
+        vm.expectRevert(
+            ISyncKeeperConsumer.InvalidSlippageTolerance.selector
+        );
+        consumer.setSlippageTolerance(10_000 + 1);
+    }
+
+    /// @dev 100% is the boundary: it is accepted, and drops the floor to zero.
+    function testSetSlippageToleranceAtMax() public {
+        consumer.setSlippageTolerance(10_000);
+        assertEq(consumer.slippageToleranceBps(), 10_000, "100% accepted");
+    }
+
+    function testSetSlippageTolerance() public {
+        uint256 newValue = 250;
+
+        vm.expectEmit(true, true, true, true, address(consumer));
+        emit ISyncKeeperConsumer.SlippageToleranceUpdated(200, newValue);
+        consumer.setSlippageTolerance(newValue);
+
+        assertEq(consumer.slippageToleranceBps(), newValue);
+    }
+
+    /// @dev The tolerance lowers the vault's floor: at 10% and parity, SYNC_AMOUNT of GHO quotes to
+    ///      SYNC_AMOUNT of sGHO, less 10%.
+    function testOnReportAppliesSlippageToleranceToMinOut() public {
+        vm.deal(address(consumer), MAX_FEE);
+        consumer.setSlippageTolerance(1_000);
+        _setSGhoShort();
+        _submitReport();
+
+        assertEq(
+            swapHandler.lastMinAmountOut(),
+            (SYNC_AMOUNT * 9_000) / 10_000,
+            "minAmountOut reduced by the 10% tolerance"
+        );
+    }
+}
+
+/**
  * @title NeedsUpkeepTest
  * @notice Unit tests for SyncKeeperConsumer.needsUpkeep across all four pool states
  * @dev Run with: forge test --match-contract NeedsUpkeepTest -vvv
@@ -747,7 +902,7 @@ contract SetMaxPriceStalenessTest is TestSyncKeeperConsumerBase {
 contract NeedsUpkeepTest is TestSyncKeeperConsumerBase {
     function testNeedsUpkeepOraclePoolNotSet() public {
         _setGhoShort();
-        customSender.setOraclePool(address(0));
+        swapHandler.setOraclePool(address(0));
 
         assertFalse(consumer.needsUpkeep(), "unset pool must not need upkeep");
     }
@@ -885,13 +1040,13 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
     }
 
     function testOnReportOracleMisconfigured() public {
-        customSender.setOraclePool(address(0));
+        swapHandler.setOraclePool(address(0));
 
         vm.expectEmit(true, true, true, true, address(consumer));
         emit ISyncKeeperConsumer.SyncSkippedOracleMisconfigured();
         _submitReport();
 
-        assertEq(customSender.syncCallCount(), 0, "must not sync");
+        assertEq(swapHandler.syncCallCount(), 0, "must not sync");
     }
 
     function testOnReportUpkeepNotNeeded() public {
@@ -904,7 +1059,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         );
         _submitReport();
 
-        assertEq(customSender.syncCallCount(), 0, "must not sync");
+        assertEq(swapHandler.syncCallCount(), 0, "must not sync");
     }
 
     /// @dev Sending either token would deepen the other side's deficit, so nothing is sent.
@@ -918,7 +1073,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         );
         _submitReport();
 
-        assertEq(customSender.syncCallCount(), 0, "must not sync");
+        assertEq(swapHandler.syncCallCount(), 0, "must not sync");
     }
 
     /// @dev Short of GHO: send the surplus sGHO to retrieve GHO.
@@ -927,17 +1082,17 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
 
         _submitReport();
 
-        assertEq(customSender.syncCallCount(), 1, "sync count");
-        assertEq(customSender.lastToken(), address(sGho), "sends sGHO");
-        assertEq(customSender.lastAmount(), SYNC_AMOUNT, "amount");
+        assertEq(swapHandler.syncCallCount(), 1, "sync count");
+        assertEq(swapHandler.lastToken(), address(sGho), "sends sGHO");
+        assertEq(swapHandler.lastAmount(), SYNC_AMOUNT, "amount");
         assertEq(
-            customSender.lastMinAmountOut(),
+            swapHandler.lastMinAmountOut(),
             _expectedGhoOut(SYNC_AMOUNT, FEED_ANSWER),
             "minAmountOut priced as sGHO -> GHO"
         );
-        assertEq(customSender.lastFeeData(), _defaultFeeData(), "feeData");
-        assertEq(customSender.lastExtraArgs(), "", "extraArgs empty");
-        assertEq(customSender.lastValue(), MAX_FEE, "native fee forwarded");
+        assertEq(swapHandler.lastFeeData(), _defaultFeeData(), "feeData");
+        assertEq(swapHandler.lastExtraArgs(), "", "extraArgs empty");
+        assertEq(swapHandler.lastValue(), MAX_FEE, "native fee forwarded");
     }
 
     /// @dev Short of sGHO: send the surplus GHO to retrieve sGHO.
@@ -946,11 +1101,11 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
 
         _submitReport();
 
-        assertEq(customSender.syncCallCount(), 1, "sync count");
-        assertEq(customSender.lastToken(), address(gho), "sends GHO");
-        assertEq(customSender.lastAmount(), SYNC_AMOUNT, "amount");
+        assertEq(swapHandler.syncCallCount(), 1, "sync count");
+        assertEq(swapHandler.lastToken(), address(gho), "sends GHO");
+        assertEq(swapHandler.lastAmount(), SYNC_AMOUNT, "amount");
         assertEq(
-            customSender.lastMinAmountOut(),
+            swapHandler.lastMinAmountOut(),
             _expectedSGhoOut(SYNC_AMOUNT, FEED_ANSWER),
             "minAmountOut priced as GHO -> sGHO"
         );
@@ -976,16 +1131,16 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         _setGhoShort();
         _submitReport();
         assertEq(
-            customSender.lastMinAmountOut(),
-            SYNC_AMOUNT * 2,
+            swapHandler.lastMinAmountOut(),
+            _applySlippage(SYNC_AMOUNT * 2),
             "sGHO -> GHO multiplies"
         );
 
         _setSGhoShort();
         _submitReport();
         assertEq(
-            customSender.lastMinAmountOut(),
-            SYNC_AMOUNT / 2,
+            swapHandler.lastMinAmountOut(),
+            _applySlippage(SYNC_AMOUNT / 2),
             "GHO -> sGHO divides"
         );
     }
@@ -999,14 +1154,14 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
 
         _submitReport();
 
-        assertEq(customSender.lastToken(), address(sGho), "sends sGHO");
+        assertEq(swapHandler.lastToken(), address(sGho), "sends sGHO");
         assertEq(
-            customSender.lastAmount(),
+            swapHandler.lastAmount(),
             spare,
             "capped at spare above floor"
         );
         assertEq(
-            customSender.lastMinAmountOut(),
+            swapHandler.lastMinAmountOut(),
             _expectedGhoOut(spare, FEED_ANSWER),
             "minAmountOut uses the capped amount"
         );
@@ -1022,10 +1177,10 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
 
         _submitReport();
 
-        assertEq(customSender.lastAmount(), spare, "sends only the spare");
+        assertEq(swapHandler.lastAmount(), spare, "sends only the spare");
 
         uint256 remaining = sGho.balanceOf(ORACLE_POOL) -
-            customSender.lastAmount();
+            swapHandler.lastAmount();
         assertEq(
             remaining,
             MIN_SGHO_BALANCE,
@@ -1046,7 +1201,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         );
         _submitReport();
 
-        assertEq(customSender.syncCallCount(), 0, "must not sync");
+        assertEq(swapHandler.syncCallCount(), 0, "must not sync");
     }
 
     /// @dev A surplus that exists but is below {minSyncAmount} does not justify a CCIP fee: the
@@ -1064,20 +1219,49 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         );
         _submitReport();
 
-        assertEq(customSender.syncCallCount(), 0, "must not sync dust");
+        assertEq(swapHandler.syncCallCount(), 0, "must not sync dust");
     }
 
+    /// @dev Paying the fee in GHO: the SwapHandler pulls it from the consumer, which works because
+    ///      the consumer approved the sender at construction and is funded with GHO here.
     function testOnReportSyncsPayingInGho() public {
-        consumer.setFeeOtoD(_feeData(MAX_FEE, true, GAS_LIMIT));
+        consumer.setFeeData(MAX_FEE, true, GAS_LIMIT);
+        gho.mint(address(consumer), MAX_FEE);
 
         _submitReport();
 
-        assertEq(customSender.syncCallCount(), 1, "sync count");
+        assertEq(swapHandler.syncCallCount(), 1, "sync count");
         assertEq(
-            customSender.lastValue(),
+            swapHandler.lastValue(),
             0,
             "no native value when paying GHO"
         );
+        assertEq(gho.balanceOf(address(consumer)), 0, "GHO fee pulled");
+        assertEq(
+            gho.balanceOf(address(swapHandler)),
+            MAX_FEE,
+            "sender received the GHO fee"
+        );
+    }
+
+    /// @dev Without the construction-time allowance the SwapHandler could not pull the GHO fee;
+    ///      the max approval is what makes the pay-in-GHO path work (finding 5 fix).
+    function testConsumerApprovesGhoToSwapHandler() public view {
+        assertEq(
+            gho.allowance(address(consumer), address(swapHandler)),
+            type(uint256).max,
+            "unlimited GHO allowance to sender"
+        );
+    }
+
+    /// @dev Paying in GHO still fails cleanly if the operator has not funded the consumer with GHO.
+    function testOnReportPayingInGhoRevertsWithoutGho() public {
+        consumer.setFeeData(MAX_FEE, true, GAS_LIMIT);
+        // No GHO minted to the consumer.
+
+        vm.prank(FORWARDER);
+        vm.expectRevert();
+        consumer.onReport(_metadata(EXPECTED_AUTHOR), "");
     }
 
     /// @dev The consumer holds no native token, so forwarding the fee fails.
@@ -1098,7 +1282,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         emit ISyncKeeperConsumer.SyncSkippedStalePrice();
         _submitReport();
 
-        assertEq(customSender.syncCallCount(), 0, "must not sync");
+        assertEq(swapHandler.syncCallCount(), 0, "must not sync");
     }
 
     function testOnReportNegativePriceSkips() public {
@@ -1108,7 +1292,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         emit ISyncKeeperConsumer.SyncSkippedStalePrice();
         _submitReport();
 
-        assertEq(customSender.syncCallCount(), 0, "must not sync");
+        assertEq(swapHandler.syncCallCount(), 0, "must not sync");
     }
 
     function testOnReportStalePriceSkips() public {
@@ -1118,7 +1302,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         emit ISyncKeeperConsumer.SyncSkippedStalePrice();
         _submitReport();
 
-        assertEq(customSender.syncCallCount(), 0, "must not sync");
+        assertEq(swapHandler.syncCallCount(), 0, "must not sync");
     }
 
     /// @dev An answer exactly at the staleness limit is still accepted.
@@ -1127,7 +1311,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
 
         _submitReport();
 
-        assertEq(customSender.syncCallCount(), 1, "sync count");
+        assertEq(swapHandler.syncCallCount(), 1, "sync count");
     }
 
     /// @dev A feed timestamped in the future is treated as unusable (skip), not an arithmetic panic.
@@ -1138,7 +1322,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         emit ISyncKeeperConsumer.SyncSkippedStalePrice();
         _submitReport();
 
-        assertEq(customSender.syncCallCount(), 0, "must not sync");
+        assertEq(swapHandler.syncCallCount(), 0, "must not sync");
     }
 
     /// @dev The gate and executor share one price check: after a skipped report the feed can recover
@@ -1146,11 +1330,11 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
     function testOnReportProceedsAfterFeedRecovers() public {
         feed.setUpdatedAt(block.timestamp - MAX_PRICE_STALENESS - 1);
         _submitReport();
-        assertEq(customSender.syncCallCount(), 0, "skipped while stale");
+        assertEq(swapHandler.syncCallCount(), 0, "skipped while stale");
 
         feed.setUpdatedAt(block.timestamp);
         _submitReport();
-        assertEq(customSender.syncCallCount(), 1, "syncs once fresh");
+        assertEq(swapHandler.syncCallCount(), 1, "syncs once fresh");
     }
 
     function testOnReportMinAmountOut(int256 answer) public {
@@ -1160,7 +1344,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         _submitReport();
 
         assertEq(
-            customSender.lastMinAmountOut(),
+            swapHandler.lastMinAmountOut(),
             _expectedGhoOut(SYNC_AMOUNT, answer),
             "minAmountOut"
         );
@@ -1172,7 +1356,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
 
         _submitReport();
 
-        assertEq(customSender.lastAmount(), newAmount, "uses updated amount");
+        assertEq(swapHandler.lastAmount(), newAmount, "uses updated amount");
     }
 
     /// @dev The report body is ignored, so an arbitrary payload still syncs.
@@ -1183,7 +1367,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
             abi.encode(uint256(1234), "junk")
         );
 
-        assertEq(customSender.syncCallCount(), 1, "sync count");
+        assertEq(swapHandler.syncCallCount(), 1, "sync count");
     }
 
     /// @dev A report whose metadata carries a different workflow owner is rejected: this is the
@@ -1209,7 +1393,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
 
         _submitReport();
 
-        assertEq(customSender.lastToken(), address(gho), "re-derived to GHO");
+        assertEq(swapHandler.lastToken(), address(gho), "re-derived to GHO");
     }
 
     /// @dev With the cooldown disabled (settlementWindow 0, the base fixture) reports can stack
@@ -1218,7 +1402,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         _submitReport();
         _submitReport();
 
-        assertEq(customSender.syncCallCount(), 2, "window 0 allows stacking");
+        assertEq(swapHandler.syncCallCount(), 2, "window 0 allows stacking");
     }
 }
 
@@ -1243,7 +1427,7 @@ contract CooldownTest is TestSyncKeeperConsumerBase {
 
         _submitReport();
 
-        assertEq(customSender.syncCallCount(), 1, "first sync proceeds");
+        assertEq(swapHandler.syncCallCount(), 1, "first sync proceeds");
         assertEq(consumer.lastSyncAt(), block.timestamp, "records timestamp");
     }
 
@@ -1258,7 +1442,7 @@ contract CooldownTest is TestSyncKeeperConsumerBase {
         emit ISyncKeeperConsumer.SyncSkippedCooldown(syncedAt, WINDOW);
         _submitReport();
 
-        assertEq(customSender.syncCallCount(), 1, "no second sync in window");
+        assertEq(swapHandler.syncCallCount(), 1, "no second sync in window");
     }
 
     function testNeedsUpkeepFalseWithinWindow() public {
@@ -1276,7 +1460,7 @@ contract CooldownTest is TestSyncKeeperConsumerBase {
         assertTrue(consumer.needsUpkeep(), "gate reopens at window end");
 
         _submitReport();
-        assertEq(customSender.syncCallCount(), 2, "second sync after window");
+        assertEq(swapHandler.syncCallCount(), 2, "second sync after window");
     }
 
     /// @dev A skipped report does not start a cooldown, so it cannot block a later real sync.
@@ -1288,7 +1472,7 @@ contract CooldownTest is TestSyncKeeperConsumerBase {
 
         _setGhoShort();
         _submitReport();
-        assertEq(customSender.syncCallCount(), 1, "next real report syncs");
+        assertEq(swapHandler.syncCallCount(), 1, "next real report syncs");
     }
 
     /// @dev Re-enabling back-to-back syncs by clearing the window mid-cooldown.
@@ -1297,7 +1481,7 @@ contract CooldownTest is TestSyncKeeperConsumerBase {
         consumer.setSettlementWindow(0);
 
         _submitReport();
-        assertEq(customSender.syncCallCount(), 2, "cleared window unblocks");
+        assertEq(swapHandler.syncCallCount(), 2, "cleared window unblocks");
     }
 }
 

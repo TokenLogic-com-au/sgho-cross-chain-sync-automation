@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 /**
  * @title ISyncKeeperConsumer Interface
  * @dev The interface of the {SyncKeeperConsumer} contract, the keeper-style consumer that rebalances
- * the two sided oracle pool of a `CustomSender` through a Chainlink CRE workflow.
+ * the two sided oracle pool of a `SwapHandler` through a Chainlink CRE workflow.
  *
  * The oracle pool holds both `GHO` and `SGHO`, and user flow pushes it either way: a deposit takes
  * `SGHO` out and puts `GHO` in, a redeem does the reverse. A sync corrects the imbalance by sending
@@ -12,11 +12,9 @@ pragma solidity ^0.8.20;
  */
 interface ISyncKeeperConsumer {
     /**
-     * @dev The encoded fee data is shorter than the three ABI words it must decode to.
-     * @param length The length of the provided fee data.
-     * @param minLength The minimum length required to decode the fee data.
+     * @dev The `gasLimit` passed to {setExtraArgs} is below {MIN_PROCESS_MESSAGE_GAS}.
      */
-    error FeeOtoDTooShort(uint256 length, uint256 minLength);
+    error InvalidGasLimit();
 
     /**
      * @dev The gas limit encoded in the fee data is below {MIN_PROCESS_MESSAGE_GAS}.
@@ -25,11 +23,22 @@ interface ISyncKeeperConsumer {
      */
     error InsufficientGasLimit(uint32 gasLimit, uint32 minGas);
 
+    /**
+     * @dev The slippage tolerance passed to {setSlippageTolerance} exceeds 100% (`MAX_BPS`).
+     */
+    error InvalidSlippageTolerance();
+
     /// @dev A required address parameter is the zero address.
     error ZeroAddress();
 
     /// @dev A required amount parameter is zero.
     error ZeroAmount();
+
+    /**
+     * Emitted when the CCIP extra arguments are updated.
+     * @param extraArgs The new encoded extra arguments forwarded to the CCIP router.
+     */
+    event ExtraArgsUpdated(bytes extraArgs);
 
     /**
      * Emitted when the minimum `GHO` balance is updated.
@@ -68,14 +77,14 @@ interface ISyncKeeperConsumer {
 
     /**
      * Emitted when the CCIP fee data is updated.
-     * @param maxFeeOtoD The maximum CCIP fee allowed for the origin to destination message.
-     * @param payInGhoOtoD Whether the fee is paid in `GHO` (`true`) or in native token (`false`).
-     * @param gasLimitOtoD The gas limit for executing the message on the destination chain.
+     * @param maxFee The maximum CCIP fee allowed for the origin to destination message.
+     * @param payInGho Whether the fee is paid in `GHO` (`true`) or in native token (`false`).
+     * @param gasLimit The gas limit for executing the message on the destination chain.
      */
-    event FeeOtoDUpdated(
-        uint128 indexed maxFeeOtoD,
-        bool indexed payInGhoOtoD,
-        uint32 indexed gasLimitOtoD
+    event FeeDataUpdated(
+        uint128 indexed maxFee,
+        bool indexed payInGho,
+        uint32 indexed gasLimit
     );
 
     /**
@@ -93,6 +102,13 @@ interface ISyncKeeperConsumer {
     event MaxPriceStalenessUpdated(uint256 previous, uint256 current);
 
     /**
+     * Emitted when the slippage tolerance is updated.
+     * @param previous The previous slippage tolerance, in basis points.
+     * @param current The new slippage tolerance, in basis points.
+     */
+    event SlippageToleranceUpdated(uint256 previous, uint256 current);
+
+    /**
      * Emitted when the oracle pool is rebalanced.
      * @param tokenSent The address of the token sent to the mainnet vault (the token in surplus).
      * @param amount The amount of `tokenSent` sent.
@@ -105,7 +121,7 @@ interface ISyncKeeperConsumer {
     );
 
     /**
-     * Emitted when a report is processed while the oracle pool is not set on the `CustomSender`,
+     * Emitted when a report is processed while the oracle pool is not set on the `SwapHandler`,
      * meaning no sync is performed.
      */
     event SyncSkippedOracleMisconfigured();
@@ -142,6 +158,24 @@ interface ISyncKeeperConsumer {
      * is not retried; the next report proceeds once the feed recovers.
      */
     event SyncSkippedStalePrice();
+
+    /**
+     * @dev Sets the extra arguments forwarded to the CCIP router on each sync, built as a
+     * `GENERIC_EXTRA_ARGS_V3` payload carrying only `gasLimit` and `finalityConfig`.
+     *
+     * Requirements:
+     *
+     * - `msg.sender` must be the owner.
+     * - `gasLimit` must be at least {MIN_PROCESS_MESSAGE_GAS}.
+     * - `finalityConfig` must select a single requested-finality mode (full finality, one flag, or a
+     *   block depth), per `FinalityCodec`.
+     *
+     * Emits an {ExtraArgsUpdated} event.
+     *
+     * @param gasLimit The gas limit for the message callback on the destination chain.
+     * @param finalityConfig The requested finality config, encoded via `FinalityCodec`.
+     */
+    function setExtraArgs(uint32 gasLimit, bytes4 finalityConfig) external;
 
     /**
      * @dev Sets the `GHO` balance below which the oracle pool is considered short of `GHO`.
@@ -219,22 +253,26 @@ interface ISyncKeeperConsumer {
     function setSettlementWindow(uint256 newWindow) external;
 
     /**
-     * @dev Sets the CCIP fee data forwarded to `CustomSender.sync`.
-     * The fee data is the encoding of `(uint128 maxFeeOtoD, bool payInGhoOtoD, uint32 gasLimitOtoD)`.
+     * @dev Sets the CCIP fee data forwarded to `SwapHandler.sync`, encoded via {FeeCodec}.
      * When the fee is paid in native token, this contract must hold enough native token to cover
-     * `maxFeeOtoD` on each sync.
+     * `maxFee` on each sync.
      *
      * Requirements:
      *
      * - `msg.sender` must be the owner.
-     * - `newFee` must be at least 96 bytes long.
-     * - The gas limit encoded in `newFee` must be at least {MIN_PROCESS_MESSAGE_GAS}.
+     * - `gasLimit` must be at least {MIN_PROCESS_MESSAGE_GAS}.
      *
-     * Emits a {FeeOtoDUpdated} event.
+     * Emits a {FeeDataUpdated} event.
      *
-     * @param newFee The new encoded CCIP fee data.
+     * @param maxFee The maximum CCIP fee allowed for the origin to destination message.
+     * @param payInGho Whether the fee is paid in `GHO` (`true`) or in native token (`false`).
+     * @param gasLimit The gas limit for executing the message on the destination chain.
      */
-    function setFeeOtoD(bytes calldata newFee) external;
+    function setFeeData(
+        uint128 maxFee,
+        bool payInGho,
+        uint32 gasLimit
+    ) external;
 
     /**
      * @dev Sets the price feed used to convert the synced amount to the opposite token.
@@ -265,22 +303,39 @@ interface ISyncKeeperConsumer {
     function setMaxPriceStaleness(uint256 newStaleness) external;
 
     /**
+     * @dev Sets the slippage tolerance applied to the sync `minAmountOut`, in basis points. The
+     * quoted output is reduced by this tolerance so that the `SGHO` vault's exchange-rate accrual
+     * during CCIP settlement does not push the actual output below the floor and revert the deposit
+     * leg. It bounds how much worse than the quote a sync will accept, so it should stay small.
+     *
+     * Requirements:
+     *
+     * - `msg.sender` must be the owner.
+     * - `newToleranceBps` must not exceed 10_000 (100%).
+     *
+     * Emits a {SlippageToleranceUpdated} event.
+     *
+     * @param newToleranceBps The new slippage tolerance, in basis points.
+     */
+    function setSlippageTolerance(uint256 newToleranceBps) external;
+
+    /**
      * @notice Returns the minimum gas required to process the CCIP message on the destination chain.
      */
     function MIN_PROCESS_MESSAGE_GAS() external view returns (uint32);
 
     /**
-     * @notice Returns the address of the `CustomSender` contract synced by this contract.
+     * @notice Returns the address of the `SwapHandler` contract synced by this contract.
      */
-    function CUSTOM_SENDER() external view returns (address);
+    function SWAP_HANDLER() external view returns (address);
 
     /**
-     * @notice Returns the address of the `GHO` token, as cached from the `CustomSender`.
+     * @notice Returns the address of the `GHO` token, as cached from the `SwapHandler`.
      */
     function GHO() external view returns (address);
 
     /**
-     * @notice Returns the address of the `SGHO` token, as cached from the `CustomSender`.
+     * @notice Returns the address of the `SGHO` token, as cached from the `SwapHandler`.
      */
     function SGHO() external view returns (address);
 
@@ -320,14 +375,24 @@ interface ISyncKeeperConsumer {
     function settlementWindow() external view returns (uint256);
 
     /**
+     * @notice Returns the slippage tolerance applied to the sync `minAmountOut`, in basis points.
+     */
+    function slippageToleranceBps() external view returns (uint256);
+
+    /**
      * @notice Returns the timestamp of the most recent sync, or 0 if none has occurred.
      */
     function lastSyncAt() external view returns (uint256);
 
     /**
-     * @notice Returns the encoded CCIP fee data forwarded to `CustomSender.sync`.
+     * @notice Returns the encoded CCIP fee data forwarded to `SwapHandler.sync`.
      */
-    function feeOtoD() external view returns (bytes memory);
+    function feeData() external view returns (bytes memory);
+
+    /**
+     * @notice Returns the encoded extra arguments forwarded to the CCIP router.
+     */
+    function extraArgs() external view returns (bytes memory);
 
     /**
      * @dev Returns whether the oracle pool can be rebalanced right now.
