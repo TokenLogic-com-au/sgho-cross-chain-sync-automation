@@ -35,6 +35,35 @@ interface ISyncKeeperConsumer {
     error ZeroAmount();
 
     /**
+     * @dev A report was processed while the oracle pool is not set on the `SwapHandler`, so no sync
+     * is possible.
+     */
+    error OraclePoolNotSet();
+
+    /**
+     * @dev A report was processed while the oracle pool holds no actionable surplus: either both
+     * sides are funded above their thresholds, both are short, or the surplus side holds less than
+     * {minSyncAmount} above its own threshold.
+     * @param ghoBalance The current `GHO` balance of the oracle pool.
+     * @param sGhoBalance The current `SGHO` balance of the oracle pool.
+     */
+    error SyncNotNeeded(uint256 ghoBalance, uint256 sGhoBalance);
+
+    /**
+     * @dev A report was processed within the {settlementWindow} of the previous sync, whose
+     * counter-token is still settling over CCIP.
+     * @param lastSyncAt The timestamp of the previous sync.
+     * @param settlementWindow The cooldown in force, in seconds.
+     */
+    error SyncInCooldown(uint256 lastSyncAt, uint256 settlementWindow);
+
+    /**
+     * @dev A report was processed while the price feed is non-positive, stale, or timestamped in the
+     * future, so a fair `minAmountOut` cannot be derived.
+     */
+    error StalePrice();
+
+    /**
      * Emitted when the CCIP extra arguments are updated.
      * @param extraArgs The new encoded extra arguments forwarded to the CCIP router.
      */
@@ -121,45 +150,6 @@ interface ISyncKeeperConsumer {
     );
 
     /**
-     * Emitted when a report is processed while the oracle pool is not set on the `SwapHandler`,
-     * meaning no sync is performed.
-     */
-    event SyncSkippedOracleMisconfigured();
-
-    /**
-     * Emitted when a report is processed while both sides of the oracle pool are funded above their
-     * thresholds, meaning no sync is performed.
-     * @param ghoBalance The current `GHO` balance of the oracle pool.
-     * @param sGhoBalance The current `SGHO` balance of the oracle pool.
-     */
-    event SyncSkippedUpkeepNotNeeded(uint256 ghoBalance, uint256 sGhoBalance);
-
-    /**
-     * Emitted when a report is processed while a side of the oracle pool is short but no actionable
-     * surplus exists to send, meaning no sync is performed. This covers both sides being below their
-     * thresholds, and the funded side holding less than {minSyncAmount} above its own threshold.
-     * @param ghoBalance The current `GHO` balance of the oracle pool.
-     * @param sGhoBalance The current `SGHO` balance of the oracle pool.
-     */
-    event SyncSkippedNoSurplus(uint256 ghoBalance, uint256 sGhoBalance);
-
-    /**
-     * Emitted when a report is processed within the {settlementWindow} of the previous sync, whose
-     * counter-token is still settling over CCIP, so no sync is performed. The report is not retried;
-     * the next report proceeds once the window elapses.
-     * @param lastSyncAt The timestamp of the previous sync.
-     * @param settlementWindow The cooldown in force, in seconds.
-     */
-    event SyncSkippedCooldown(uint256 lastSyncAt, uint256 settlementWindow);
-
-    /**
-     * Emitted when a report is processed while the price feed is non-positive, stale, or timestamped
-     * in the future, so a fair `minAmountOut` cannot be derived and no sync is performed. The report
-     * is not retried; the next report proceeds once the feed recovers.
-     */
-    event SyncSkippedStalePrice();
-
-    /**
      * @dev Sets the extra arguments forwarded to the CCIP router on each sync, built as a
      * `GENERIC_EXTRA_ARGS_V3` payload carrying only `gasLimit` and `finalityConfig`.
      *
@@ -239,7 +229,7 @@ interface ISyncKeeperConsumer {
 
     /**
      * @dev Sets the minimum delay between syncs, in seconds. After a sync, reports within this
-     * window are skipped so that the in-flight counter-token can settle before another correction is
+     * window revert so that the in-flight counter-token can settle before another correction is
      * made. Setting it to 0 disables the cooldown and allows back-to-back syncs.
      *
      * Requirements:
@@ -403,7 +393,7 @@ interface ISyncKeeperConsumer {
      * least {minSyncAmount} above its own threshold to send, no {settlementWindow} cooldown from a
      * prior sync is in force, and the price feed is usable (positive and within {maxPriceStaleness}).
      * The gate applies the identical checks the executor applies, so it never signals a sync that
-     * {onReport} would then skip.
+     * {onReport} would then reject with a revert.
      *
      * @return upkeepNeeded True if a sync would be performed.
      */
