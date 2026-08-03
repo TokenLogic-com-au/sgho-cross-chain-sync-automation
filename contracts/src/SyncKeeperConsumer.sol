@@ -2,15 +2,19 @@
 pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import {ReceiverTemplate} from "./ReceiverTemplate.sol";
+import {ExtraArgsCodec} from "./libraries/ExtraArgsCodec.sol";
+import {FeeCodec} from "./libraries/FeeCodec.sol";
+import {FinalityCodec} from "./libraries/FinalityCodec.sol";
 import {IAggregatorV3} from "./interfaces/IAggregatorV3.sol";
-import {ICustomSender} from "./interfaces/ICustomSender.sol";
+import {ISwapHandler} from "./interfaces/ISwapHandler.sol";
 import {ISyncKeeperConsumer} from "./interfaces/ISyncKeeperConsumer.sol";
 
 /**
  * @title SyncKeeperConsumer Contract
- * @dev The keeper-style consumer that rebalances the two sided oracle pool of a `CustomSender`
+ * @dev The keeper-style consumer that rebalances the two sided oracle pool of a `SwapHandler`
  * through a Chainlink CRE workflow.
  *
  * The oracle pool holds both `GHO` and `SGHO`, and user flow pushes it either way: a deposit puts
@@ -25,79 +29,99 @@ import {ISyncKeeperConsumer} from "./interfaces/ISyncKeeperConsumer.sol";
  *
  * The workflow reads {needsUpkeep} and, when it holds, submits a signed report. The
  * {ReceiverTemplate} validation path then calls {_processReport}, which re-reads both balances,
- * re-derives which token is in surplus, and calls `CustomSender.sync`. The body of the report is
+ * re-derives which token is in surplus, and calls `SwapHandler.sync`. The body of the report is
  * ignored, as every parameter of the sync is derived on chain.
  *
- * This contract must be granted the `SYNC_ROLE` on the `CustomSender`, and must hold enough native
- * token to cover the CCIP fee whenever the fee is not paid in `GHO`.
+ * This contract must be granted the `SYNC_ROLE` on the `SwapHandler`. To cover the CCIP fee it must
+ * hold enough native token when the fee is paid in native, or enough `GHO` when the fee is paid in
+ * `GHO`; for the latter it grants the `SwapHandler` an unlimited `GHO` allowance at construction so
+ * the sender can pull the fee.
  *
- * {CUSTOM_SENDER}, {GHO} and {SGHO} are immutable and cached from the `CustomSender` at
+ * {SWAP_HANDLER}, {GHO} and {SGHO} are immutable and cached from the `SwapHandler` at
  * construction. The thresholds ({minGhoBalance}, {minSGhoBalance}), the sync parameters
- * ({syncAmount}, {feeOtoD}, {extraArgs}) and the feed configuration ({priceFeed},
- * {maxPriceStaleness}) are owner-updatable.
+ * ({syncAmount}, {minSyncAmount}, {settlementWindow}, {feeData}) and the feed configuration
+ * ({priceFeed}, {maxPriceStaleness}) are owner-updatable.
  */
 contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
-    /// @inheritdoc ISyncKeeperConsumer
-    uint32 public constant override MIN_PROCESS_MESSAGE_GAS = 400_000;
+    using SafeERC20 for IERC20;
 
     /// @inheritdoc ISyncKeeperConsumer
-    address public immutable override CUSTOM_SENDER;
+    uint32 public constant MIN_PROCESS_MESSAGE_GAS = 400_000;
+
+    /// @dev Basis-point denominator representing 100%.
+    uint256 private constant MAX_BPS = 10_000;
 
     /// @inheritdoc ISyncKeeperConsumer
-    address public immutable override GHO;
+    address public immutable SWAP_HANDLER;
 
     /// @inheritdoc ISyncKeeperConsumer
-    address public immutable override SGHO;
+    address public immutable GHO;
 
     /// @inheritdoc ISyncKeeperConsumer
-    uint256 public override minGhoBalance;
+    address public immutable SGHO;
 
     /// @inheritdoc ISyncKeeperConsumer
-    uint256 public override minSGhoBalance;
+    uint256 public minGhoBalance;
 
     /// @inheritdoc ISyncKeeperConsumer
-    uint256 public override syncAmount;
+    uint256 public minSGhoBalance;
 
     /// @inheritdoc ISyncKeeperConsumer
-    uint256 public override minSyncAmount;
+    uint256 public syncAmount;
 
     /// @inheritdoc ISyncKeeperConsumer
-    address public override priceFeed;
+    uint256 public minSyncAmount;
 
     /// @inheritdoc ISyncKeeperConsumer
-    uint256 public override maxPriceStaleness;
+    address public priceFeed;
 
     /// @inheritdoc ISyncKeeperConsumer
-    uint256 public override settlementWindow;
+    uint256 public maxPriceStaleness;
 
     /// @inheritdoc ISyncKeeperConsumer
-    uint256 public override lastSyncAt;
+    uint256 public settlementWindow;
 
-    /// @dev The encoded CCIP fee data forwarded to `CustomSender.sync`.
-    bytes private _feeOtoD;
+    /// @inheritdoc ISyncKeeperConsumer
+    uint256 public slippageToleranceBps;
+
+    /// @inheritdoc ISyncKeeperConsumer
+    uint256 public lastSyncAt;
+
+    /// @dev The encoded CCIP fee data forwarded to `SwapHandler.sync`.
+    bytes private _feeData;
 
     /// @dev The encoded extra arguments forwarded to the CCIP router.
-    bytes private _extraArgs;
+    bytes private _extraArgs = "";
 
     /**
-     * @dev Sets the immutable values cached from the `CustomSender`, and the initial thresholds,
+     * @dev Sets the immutable values cached from the `SwapHandler`, and the initial thresholds,
      * sync parameters and feed configuration.
      *
      * Requirements:
      *
-     * - `customSender_` and `priceFeed_` must not be the zero address.
-     * - The oracle pool, `GHO` and `SGHO` of `customSender_` must not be the zero address.
+     * - `swapHandler_`, `priceFeed_` and `expectedAuthor_` must not be the zero address.
+     * - The oracle pool, `GHO` and `SGHO` of `swapHandler_` must not be the zero address.
      * - `minGhoBalance_`, `minSGhoBalance_`, `syncAmount_` and `minSyncAmount_` must be greater than
      *   0.
-     * - `feeOtoD_` must be at least 96 bytes long and encode a gas limit of at least
-     *   {MIN_PROCESS_MESSAGE_GAS}.
+     * - `feeData_` must be a {FeeCodec}-encoded CCIP fee (at least 21 bytes) whose gas limit is at
+     *   least {MIN_PROCESS_MESSAGE_GAS}.
+     *
+     * `expectedAuthor_` pins the workflow owner whose reports {onReport} accepts, so that a report
+     * from another workflow sharing the same forwarder cannot trigger a sync. It is required at
+     * construction; the owner can later change it, or clear it, through the inherited
+     * {setExpectedAuthor}, so operators must keep an author configured to preserve this protection.
+     *
+     * `settlementWindow_` may be 0, which disables the cooldown and allows back-to-back syncs.
+     * For sensible sizing `minSyncAmount_` should be no greater than `syncAmount_`, though this is
+     * not enforced.
      *
      * `settlementWindow_` may be 0, which disables the cooldown and allows back-to-back syncs.
      * For sensible sizing `minSyncAmount_` should be no greater than `syncAmount_`, though this is
      * not enforced.
      *
      * @param forwarder The address of the Chainlink Forwarder contract.
-     * @param customSender_ The address of the `CustomSender` contract to sync.
+     * @param expectedAuthor_ The address of the workflow owner whose reports are accepted.
+     * @param swapHandler_ The address of the `SwapHandler` contract to sync.
      * @param priceFeed_ The address of the sGHO/GHO exchange rate feed.
      * @param maxPriceStaleness_ The maximum age tolerated for the price feed answer, in seconds.
      * @param minGhoBalance_ The `GHO` balance below which the pool is considered short of `GHO`.
@@ -105,12 +129,12 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      * @param syncAmount_ The maximum amount of the surplus token sent on each sync.
      * @param minSyncAmount_ The minimum surplus above threshold required to perform a sync.
      * @param settlementWindow_ The minimum delay between syncs, in seconds (0 disables it).
-     * @param feeOtoD_ The encoded CCIP fee data.
-     * @param extraArgs_ The encoded extra arguments forwarded to the CCIP router.
+     * @param feeData_ The encoded CCIP fee data.
      */
     constructor(
         address forwarder,
-        address customSender_,
+        address expectedAuthor_,
+        address swapHandler_,
         address priceFeed_,
         uint256 maxPriceStaleness_,
         uint256 minGhoBalance_,
@@ -118,26 +142,13 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         uint256 syncAmount_,
         uint256 minSyncAmount_,
         uint256 settlementWindow_,
-        bytes memory feeOtoD_,
-        bytes memory extraArgs_
+        bytes memory feeData_
     ) ReceiverTemplate(forwarder) {
         require(
-            customSender_ != address(0) && priceFeed_ != address(0),
+            priceFeed_ != address(0) && expectedAuthor_ != address(0),
             ZeroAddress()
         );
 
-        address pool = ICustomSender(customSender_).getOraclePool();
-        address gho = ICustomSender(customSender_).GHO();
-        address sGho = ICustomSender(customSender_).SGHO();
-
-        require(
-            pool != address(0) && gho != address(0) && sGho != address(0),
-            ZeroAddress()
-        );
-
-        // A zero threshold would mean that side is never considered short, silently disabling half
-        // of the rebalance. A zero `minSyncAmount_` would let a zero `sendable` slip past the floor
-        // in {_evaluatePool} and produce a zero-amount sync that `CustomSender.sync` rejects.
         require(
             minGhoBalance_ > 0 &&
                 minSGhoBalance_ > 0 &&
@@ -146,9 +157,12 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
             ZeroAmount()
         );
 
-        _decodeAndValidateFeeOtoD(feeOtoD_);
+        _decodeAndValidateFeeData(feeData_);
+        _setExpectedAuthor(expectedAuthor_);
 
-        CUSTOM_SENDER = customSender_;
+        (address gho, address sGho) = _readAndValidateSender(swapHandler_);
+
+        SWAP_HANDLER = swapHandler_;
         GHO = gho;
         SGHO = sGho;
         priceFeed = priceFeed_;
@@ -158,18 +172,35 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         syncAmount = syncAmount_;
         minSyncAmount = minSyncAmount_;
         settlementWindow = settlementWindow_;
-        _feeOtoD = feeOtoD_;
-        _extraArgs = extraArgs_;
+        slippageToleranceBps = 200; // 2% default
+        _feeData = feeData_;
+
+        IERC20(gho).forceApprove(swapHandler_, type(uint256).max);
     }
 
     /**
      * @dev Receives the native token used to pay the CCIP fee when it is not paid in `GHO`, and the
-     * excess refunded by the `CustomSender` after each sync.
+     * excess refunded by the `SwapHandler` after each sync.
      */
     receive() external payable {}
 
     /// @inheritdoc ISyncKeeperConsumer
-    function setMinGhoBalance(uint256 minBal) external override onlyOwner {
+    function setExtraArgs(
+        uint32 gasLimit,
+        bytes4 finalityConfig
+    ) external onlyOwner {
+        require(gasLimit >= MIN_PROCESS_MESSAGE_GAS, InvalidGasLimit());
+        FinalityCodec._validateRequestedFinality(finalityConfig);
+
+        _extraArgs = ExtraArgsCodec._getBasicEncodedExtraArgsV3(
+            gasLimit,
+            finalityConfig
+        );
+        emit ExtraArgsUpdated(_extraArgs);
+    }
+
+    /// @inheritdoc ISyncKeeperConsumer
+    function setMinGhoBalance(uint256 minBal) external onlyOwner {
         require(minBal > 0, ZeroAmount());
 
         uint256 previousMinBal = minGhoBalance;
@@ -179,7 +210,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function setMinSGhoBalance(uint256 minBal) external override onlyOwner {
+    function setMinSGhoBalance(uint256 minBal) external onlyOwner {
         require(minBal > 0, ZeroAmount());
 
         uint256 previousMinBal = minSGhoBalance;
@@ -189,7 +220,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function setSyncAmount(uint256 newAmount) external override onlyOwner {
+    function setSyncAmount(uint256 newAmount) external onlyOwner {
         require(newAmount > 0, ZeroAmount());
 
         uint256 previousAmount = syncAmount;
@@ -199,7 +230,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function setMinSyncAmount(uint256 newAmount) external override onlyOwner {
+    function setMinSyncAmount(uint256 newAmount) external onlyOwner {
         require(newAmount > 0, ZeroAmount());
 
         uint256 previousAmount = minSyncAmount;
@@ -209,7 +240,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function setSettlementWindow(uint256 newWindow) external override onlyOwner {
+    function setSettlementWindow(uint256 newWindow) external onlyOwner {
         uint256 previousWindow = settlementWindow;
         settlementWindow = newWindow;
 
@@ -217,31 +248,24 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function setFeeOtoD(bytes calldata newFee) external override onlyOwner {
-        bytes memory feeMem = newFee;
-        (
-            uint128 maxFeeOtoD,
-            bool payInGhoOtoD,
-            uint32 gasLimitOtoD
-        ) = _decodeAndValidateFeeOtoD(feeMem);
+    function setFeeData(
+        uint128 maxFee,
+        bool payInGho,
+        uint32 gasLimit
+    ) external onlyOwner {
+        require(
+            gasLimit >= MIN_PROCESS_MESSAGE_GAS,
+            InsufficientGasLimit(gasLimit, MIN_PROCESS_MESSAGE_GAS)
+        );
 
-        _feeOtoD = newFee;
+        _feeData = FeeCodec.encodeCCIP(maxFee, payInGho, gasLimit);
 
-        emit FeeOtoDUpdated(maxFeeOtoD, payInGhoOtoD, gasLimitOtoD);
+        emit FeeDataUpdated(maxFee, payInGho, gasLimit);
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function setExtraArgs(
-        bytes calldata newExtraArgs
-    ) external override onlyOwner {
-        _extraArgs = newExtraArgs;
-
-        emit ExtraArgsUpdated(newExtraArgs);
-    }
-
-    /// @inheritdoc ISyncKeeperConsumer
-    function setPriceFeed(address newFeed) external override onlyOwner {
-        if (newFeed == address(0)) revert ZeroAddress();
+    function setPriceFeed(address newFeed) external onlyOwner {
+        require(newFeed != address(0), ZeroAddress());
 
         address previousFeed = priceFeed;
         priceFeed = newFeed;
@@ -250,9 +274,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function setMaxPriceStaleness(
-        uint256 newStaleness
-    ) external override onlyOwner {
+    function setMaxPriceStaleness(uint256 newStaleness) external onlyOwner {
         uint256 previousStaleness = maxPriceStaleness;
         maxPriceStaleness = newStaleness;
 
@@ -260,17 +282,27 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function feeOtoD() external view override returns (bytes memory) {
-        return _feeOtoD;
+    function setSlippageTolerance(uint256 newToleranceBps) external onlyOwner {
+        require(newToleranceBps <= MAX_BPS, InvalidSlippageTolerance());
+
+        uint256 previousTolerance = slippageToleranceBps;
+        slippageToleranceBps = newToleranceBps;
+
+        emit SlippageToleranceUpdated(previousTolerance, newToleranceBps);
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function extraArgs() external view override returns (bytes memory) {
+    function feeData() external view returns (bytes memory) {
+        return _feeData;
+    }
+
+    /// @inheritdoc ISyncKeeperConsumer
+    function extraArgs() external view returns (bytes memory) {
         return _extraArgs;
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function needsUpkeep() external view override returns (bool) {
+    function needsUpkeep() external view returns (bool) {
         if (!_validateOracle()) return false;
 
         (uint256 ghoBalance, uint256 sGhoBalance) = _poolBalances();
@@ -352,15 +384,13 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
             return;
         }
 
-        bytes memory feeMem = _feeOtoD;
-        (uint128 maxFeeOtoD, bool payInGhoOtoD, ) = _decodeAndValidateFeeOtoD(
-            feeMem
-        );
-        uint256 nativeAmount = payInGhoOtoD ? 0 : uint256(maxFeeOtoD);
+        bytes memory feeMem = _feeData;
+        (uint128 maxFee, bool payInGho, ) = _decodeAndValidateFeeData(feeMem);
+        uint256 nativeAmount = payInGho ? 0 : uint256(maxFee);
 
         lastSyncAt = block.timestamp;
 
-        ICustomSender(CUSTOM_SENDER).sync{value: nativeAmount}(
+        ISwapHandler(SWAP_HANDLER).sync{value: nativeAmount}(
             surplusToken,
             amount,
             minAmountOut,
@@ -372,14 +402,45 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /**
-     * @dev Returns whether the oracle pool is set on the `CustomSender`.
-     * The oracle pool can be unset by the `CustomSender` admin at any time, so it is checked before
+     * @dev Reads the `GHO` and `SGHO` tokens from the `SwapHandler` and validates its configuration.
+     * Extracted from the constructor so the intermediate reads stay off the constructor's stack.
+     *
+     * Requirements:
+     *
+     * - `swapHandler_` must not be the zero address.
+     * - The oracle pool, `GHO` and `SGHO` of `swapHandler_` must not be the zero address.
+     *
+     * @param swapHandler_ The address of the `SwapHandler` contract to sync.
+     * @return The `GHO` token cached from the `SwapHandler`.
+     * @return The `SGHO` token cached from the `SwapHandler`.
+     */
+    function _readAndValidateSender(
+        address swapHandler_
+    ) private view returns (address, address) {
+        require(swapHandler_ != address(0), ZeroAddress());
+
+        address gho = ISwapHandler(swapHandler_).GHO();
+        address sGho = ISwapHandler(swapHandler_).SGHO();
+
+        require(
+            ISwapHandler(swapHandler_).getOraclePool() != address(0) &&
+                gho != address(0) &&
+                sGho != address(0),
+            ZeroAddress()
+        );
+
+        return (gho, sGho);
+    }
+
+    /**
+     * @dev Returns whether the oracle pool is set on the `SwapHandler`.
+     * The oracle pool can be unset by the `SwapHandler` admin at any time, so it is checked before
      * every read of the pool balances.
      *
      * @return True if the oracle pool is set.
      */
     function _validateOracle() internal view returns (bool) {
-        return ICustomSender(CUSTOM_SENDER).getOraclePool() != address(0);
+        return ISwapHandler(SWAP_HANDLER).getOraclePool() != address(0);
     }
 
     /**
@@ -410,7 +471,6 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
 
         address surplusToken = ghoShort ? SGHO : GHO;
 
-        // The surplus side is at or above its own threshold, so neither branch can underflow.
         uint256 sendable = ghoShort
             ? sGhoBalance - minSGhoBalance
             : ghoBalance - minGhoBalance;
@@ -433,7 +493,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /**
-     * @dev Returns both token balances of the oracle pool of the `CustomSender`.
+     * @dev Returns both token balances of the oracle pool of the `SwapHandler`.
      *
      * Requirements:
      *
@@ -443,17 +503,17 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      * @return The `SGHO` balance of the oracle pool.
      */
     function _poolBalances() private view returns (uint256, uint256) {
-        address pool = ICustomSender(CUSTOM_SENDER).getOraclePool();
+        address pool = ISwapHandler(SWAP_HANDLER).getOraclePool();
 
         return (IERC20(GHO).balanceOf(pool), IERC20(SGHO).balanceOf(pool));
     }
 
     /**
-     * @dev Decodes and validates the encoded CCIP fee data.
+     * @dev Decodes and validates the {FeeCodec}-encoded CCIP fee data.
      *
      * Requirements:
      *
-     * - `fee` must be at least 96 bytes long, the length of the three ABI words it decodes to.
+     * - `fee` must be a {FeeCodec}-encoded CCIP fee (at least 21 bytes).
      * - The gas limit encoded in `fee` must be at least {MIN_PROCESS_MESSAGE_GAS}.
      *
      * @param fee The encoded CCIP fee data.
@@ -461,18 +521,18 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      * @return Whether the fee is paid in `GHO` (`true`) or in native token (`false`).
      * @return The gas limit for executing the message on the destination chain.
      */
-    function _decodeAndValidateFeeOtoD(
+    function _decodeAndValidateFeeData(
         bytes memory fee
     ) private pure returns (uint128, bool, uint32) {
-        if (fee.length < 96) revert FeeOtoDTooShort(fee.length, 96);
-        (uint128 maxFeeOtoD, bool payInGhoOtoD, uint32 gasLimitOtoD) = abi
-            .decode(fee, (uint128, bool, uint32));
+        (uint128 maxFee, bool payInGho, uint32 gasLimit) = FeeCodec
+            .decodeCCIPMemory(fee);
 
-        if (gasLimitOtoD < MIN_PROCESS_MESSAGE_GAS) {
-            revert InsufficientGasLimit(gasLimitOtoD, MIN_PROCESS_MESSAGE_GAS);
-        }
+        require(
+            gasLimit >= MIN_PROCESS_MESSAGE_GAS,
+            InsufficientGasLimit(gasLimit, MIN_PROCESS_MESSAGE_GAS)
+        );
 
-        return (maxFeeOtoD, payInGhoOtoD, gasLimitOtoD);
+        return (maxFee, payInGho, gasLimit);
     }
 
     /**
@@ -482,7 +542,10 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      * The feed answer is the amount of `GHO` assets per 1 `SGHO` share, scaled by
      * `10 ** feed.decimals()`, so the conversion runs in opposite directions per token: sending
      * `GHO` divides by the rate to get `SGHO` shares, sending `SGHO` multiplies by it to get `GHO`
-     * assets.
+     * assets. The result is then reduced by {slippageToleranceBps}: the `SGHO` vault is an ERC4626
+     * whose exchange rate keeps accruing while the sync settles over CCIP, so the mainnet vault mints
+     * against a higher rate than quoted here; without this buffer the `GHO`-to-`SGHO` deposit leg
+     * would revert with `MinimumOutputNotMet` and force a cross-chain refund.
      *
      * The price feed is the single precondition that {needsUpkeep} cannot check by reading balances
      * alone, so it is validated here and this helper is shared by both the gate and the executor:
@@ -494,13 +557,14 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      *
      * @param tokenIn The address of the token being sent, either `GHO` or `SGHO`.
      * @param amountIn The amount of `tokenIn` being sent.
-     * @return ok Whether the feed answer is usable (positive and within {maxPriceStaleness}).
-     * @return minAmountOut The equivalent amount of the opposite token, or 0 when `ok` is false.
+     * @return Whether the feed answer is usable (positive and within {maxPriceStaleness}).
+     * @return The equivalent amount of the opposite token less {slippageToleranceBps}, or 0 when the
+     *         first return is false.
      */
     function _quote(
         address tokenIn,
         uint256 amountIn
-    ) private view returns (bool ok, uint256 minAmountOut) {
+    ) private view returns (bool, uint256) {
         IAggregatorV3 feed = IAggregatorV3(priceFeed);
         (, int256 answer, , uint256 updatedAt, ) = feed.latestRoundData();
 
@@ -515,9 +579,13 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         uint256 rate = uint256(answer);
         uint256 scale = 10 ** feed.decimals();
 
-        minAmountOut = tokenIn == GHO
+        uint256 expectedOut = tokenIn == GHO
             ? (amountIn * scale) / rate
             : (amountIn * rate) / scale;
-        ok = true;
+
+        uint256 minAmountOut = (expectedOut *
+            (MAX_BPS - slippageToleranceBps)) / MAX_BPS;
+
+        return (true, minAmountOut);
     }
 }

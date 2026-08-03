@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {ICustomSender} from "../../src/interfaces/ICustomSender.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-/// @dev Records the arguments of the last {sync} call so tests can assert on them.
-contract MockCustomSender is ICustomSender {
+import {ISwapHandler} from "../../src/interfaces/ISwapHandler.sol";
+import {FeeCodec} from "../../src/libraries/FeeCodec.sol";
+
+/// @dev Records the arguments of the last {sync} call so tests can assert on them. When the fee data
+///      says to pay in `GHO`, it pulls the fee from the caller like the real `SwapHandler`, so the
+///      caller's `GHO` allowance to this contract is genuinely exercised.
+contract MockSwapHandler is ISwapHandler {
     address public override GHO;
     address public override SGHO;
 
@@ -44,6 +49,11 @@ contract MockCustomSender is ICustomSender {
         bytes calldata feeData,
         bytes calldata extraArgs
     ) external payable override returns (bytes32 messageId) {
+        (uint128 maxFee, bool payInGho, ) = FeeCodec.decodeCCIP(feeData);
+        if (payInGho) {
+            IERC20(GHO).transferFrom(msg.sender, address(this), maxFee);
+        }
+
         syncCallCount++;
         lastValue = msg.value;
         lastToken = token;

@@ -22,16 +22,16 @@ abstract contract ReceiverTemplate is IReceiver, Ownable {
     bytes private constant HEX_CHARS = "0123456789abcdef";
 
     /// @dev The address allowed to call {onReport}. If set to `address(0)`, the check is disabled.
-    address private s_forwarderAddress;
+    address private _forwarderAddress;
 
     /// @dev The workflow owner accepted by {onReport}. If set to `address(0)`, the check is disabled.
-    address private s_expectedAuthor;
+    address private _expectedAuthor;
 
-    /// @dev The workflow name accepted by {onReport}. Only validated when `s_expectedAuthor` is set.
-    bytes10 private s_expectedWorkflowName;
+    /// @dev The workflow name accepted by {onReport}. Only validated when `_expectedAuthor` is set.
+    bytes10 private _expectedWorkflowName;
 
     /// @dev The workflow id accepted by {onReport}. If set to `bytes32(0)`, the check is disabled.
-    bytes32 private s_expectedWorkflowId;
+    bytes32 private _expectedWorkflowId;
 
     /**
      * @dev Sets `msg.sender` as the owner and sets the forwarder address.
@@ -47,10 +47,8 @@ abstract contract ReceiverTemplate is IReceiver, Ownable {
      * @param forwarderAddress The address of the Chainlink Forwarder contract.
      */
     constructor(address forwarderAddress) Ownable(msg.sender) {
-        if (forwarderAddress == address(0)) {
-            revert InvalidForwarderAddress();
-        }
-        s_forwarderAddress = forwarderAddress;
+        require(forwarderAddress != address(0), InvalidForwarderAddress());
+        _forwarderAddress = forwarderAddress;
 
         emit ForwarderAddressUpdated(address(0), forwarderAddress);
     }
@@ -64,16 +62,16 @@ abstract contract ReceiverTemplate is IReceiver, Ownable {
     ) external override {
         // Security Check 1: Verify caller is the trusted Chainlink Forwarder (if configured)
         if (
-            s_forwarderAddress != address(0) && msg.sender != s_forwarderAddress
+            _forwarderAddress != address(0) && msg.sender != _forwarderAddress
         ) {
-            revert InvalidSender(msg.sender, s_forwarderAddress);
+            revert InvalidSender(msg.sender, _forwarderAddress);
         }
 
         // Security Checks 2-4: Verify workflow identity - ID, owner, and/or name (if any are configured)
         if (
-            s_expectedWorkflowId != bytes32(0) ||
-            s_expectedAuthor != address(0) ||
-            s_expectedWorkflowName != bytes10(0)
+            _expectedWorkflowId != bytes32(0) ||
+            _expectedAuthor != address(0) ||
+            _expectedWorkflowName != bytes10(0)
         ) {
             (
                 bytes32 workflowId,
@@ -82,26 +80,26 @@ abstract contract ReceiverTemplate is IReceiver, Ownable {
             ) = _decodeMetadata(metadata);
 
             if (
-                s_expectedWorkflowId != bytes32(0) &&
-                workflowId != s_expectedWorkflowId
+                _expectedWorkflowId != bytes32(0) &&
+                workflowId != _expectedWorkflowId
             ) {
-                revert InvalidWorkflowId(workflowId, s_expectedWorkflowId);
+                revert InvalidWorkflowId(workflowId, _expectedWorkflowId);
             }
             if (
-                s_expectedAuthor != address(0) &&
-                workflowOwner != s_expectedAuthor
+                _expectedAuthor != address(0) &&
+                workflowOwner != _expectedAuthor
             ) {
-                revert InvalidAuthor(workflowOwner, s_expectedAuthor);
+                revert InvalidAuthor(workflowOwner, _expectedAuthor);
             }
 
-            if (s_expectedWorkflowName != bytes10(0)) {
-                if (s_expectedAuthor == address(0)) {
+            if (_expectedWorkflowName != bytes10(0)) {
+                if (_expectedAuthor == address(0)) {
                     revert WorkflowNameRequiresAuthorValidation();
                 }
-                if (workflowName != s_expectedWorkflowName) {
+                if (workflowName != _expectedWorkflowName) {
                     revert InvalidWorkflowName(
                         workflowName,
-                        s_expectedWorkflowName
+                        _expectedWorkflowName
                     );
                 }
             }
@@ -125,13 +123,13 @@ abstract contract ReceiverTemplate is IReceiver, Ownable {
      * @param forwarder The address of the new forwarder.
      */
     function setForwarderAddress(address forwarder) external onlyOwner {
-        address previousForwarder = s_forwarderAddress;
+        address previousForwarder = _forwarderAddress;
         if (forwarder == address(0)) {
             emit SecurityWarning(
                 "Forwarder address set to zero - contract is now INSECURE"
             );
         }
-        s_forwarderAddress = forwarder;
+        _forwarderAddress = forwarder;
         emit ForwarderAddressUpdated(previousForwarder, forwarder);
     }
 
@@ -147,8 +145,21 @@ abstract contract ReceiverTemplate is IReceiver, Ownable {
      * @param author The address of the new expected author, or `address(0)` to disable the check.
      */
     function setExpectedAuthor(address author) external onlyOwner {
-        address previousAuthor = s_expectedAuthor;
-        s_expectedAuthor = author;
+        _setExpectedAuthor(author);
+    }
+
+    /**
+     * @dev Sets the workflow owner accepted by {onReport}, without an access check.
+     * Available to derived contracts so they can set the expected author at construction, before
+     * the public setter's `onlyOwner` context is usable.
+     *
+     * Emits an {ExpectedAuthorUpdated} event.
+     *
+     * @param author The address of the new expected author, or `address(0)` to disable the check.
+     */
+    function _setExpectedAuthor(address author) internal {
+        address previousAuthor = _expectedAuthor;
+        _expectedAuthor = author;
 
         emit ExpectedAuthorUpdated(previousAuthor, author);
     }
@@ -167,10 +178,10 @@ abstract contract ReceiverTemplate is IReceiver, Ownable {
      * @param name The name of the workflow, or an empty string to disable the check.
      */
     function setExpectedWorkflowName(string calldata name) external onlyOwner {
-        bytes10 previousName = s_expectedWorkflowName;
+        bytes10 previousName = _expectedWorkflowName;
 
         if (bytes(name).length == 0) {
-            s_expectedWorkflowName = bytes10(0);
+            _expectedWorkflowName = bytes10(0);
             emit ExpectedWorkflowNameUpdated(previousName, bytes10(0));
             return;
         }
@@ -181,8 +192,8 @@ abstract contract ReceiverTemplate is IReceiver, Ownable {
         for (uint256 i = 0; i < 10; i++) {
             first10[i] = hexString[i];
         }
-        s_expectedWorkflowName = bytes10(first10);
-        emit ExpectedWorkflowNameUpdated(previousName, s_expectedWorkflowName);
+        _expectedWorkflowName = bytes10(first10);
+        emit ExpectedWorkflowNameUpdated(previousName, _expectedWorkflowName);
     }
 
     /**
@@ -197,8 +208,8 @@ abstract contract ReceiverTemplate is IReceiver, Ownable {
      * @param id The new expected workflow id, or `bytes32(0)` to disable the check.
      */
     function setExpectedWorkflowId(bytes32 id) external onlyOwner {
-        bytes32 previousId = s_expectedWorkflowId;
-        s_expectedWorkflowId = id;
+        bytes32 previousId = _expectedWorkflowId;
+        _expectedWorkflowId = id;
         emit ExpectedWorkflowIdUpdated(previousId, id);
     }
 
@@ -207,7 +218,7 @@ abstract contract ReceiverTemplate is IReceiver, Ownable {
      * disabled.
      */
     function getForwarderAddress() external view returns (address) {
-        return s_forwarderAddress;
+        return _forwarderAddress;
     }
 
     /**
@@ -215,7 +226,7 @@ abstract contract ReceiverTemplate is IReceiver, Ownable {
      * disabled.
      */
     function getExpectedAuthor() external view returns (address) {
-        return s_expectedAuthor;
+        return _expectedAuthor;
     }
 
     /**
@@ -223,7 +234,7 @@ abstract contract ReceiverTemplate is IReceiver, Ownable {
      * disabled.
      */
     function getExpectedWorkflowName() external view returns (bytes10) {
-        return s_expectedWorkflowName;
+        return _expectedWorkflowName;
     }
 
     /**
@@ -231,7 +242,7 @@ abstract contract ReceiverTemplate is IReceiver, Ownable {
      * disabled.
      */
     function getExpectedWorkflowId() external view returns (bytes32) {
-        return s_expectedWorkflowId;
+        return _expectedWorkflowId;
     }
 
     /// @inheritdoc IERC165

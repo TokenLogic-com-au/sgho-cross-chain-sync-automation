@@ -2,11 +2,11 @@
 pragma solidity ^0.8.20;
 
 /**
- * @title ICustomSender Interface
- * @dev The minimal interface of the `CustomSender` contract. It exposes the oracle pool and token
+ * @title ISwapHandler Interface
+ * @dev The minimal interface of the `SwapHandler` contract. It exposes the oracle pool and token
  * addresses read by the keeper gate, and the {sync} function called to rebalance the oracle pool.
  */
-interface ICustomSender {
+interface ISwapHandler {
     /**
      * @dev Rebalances the oracle pool by pulling `amount` of `token` from it and sending the tokens
      * to the mainnet vault via CCIP. The CCIP fee is paid by the caller and, as encoded in
@@ -14,7 +14,7 @@ interface ICustomSender {
      *
      * Requirements:
      *
-     * - `msg.sender` must have the `SYNC_ROLE` on the `CustomSender`.
+     * - `msg.sender` must have the `SYNC_ROLE` on the `SwapHandler`.
      * - `token` must be either `GHO` or `SGHO`.
      * - The oracle pool must be set.
      *
