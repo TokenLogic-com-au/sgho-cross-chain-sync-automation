@@ -1046,8 +1046,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
     function testOnReportOracleMisconfigured() public {
         swapHandler.setOraclePool(address(0));
 
-        vm.expectEmit(true, true, true, true, address(consumer));
-        emit ISyncKeeperConsumer.SyncSkippedOracleMisconfigured();
+        vm.expectRevert(ISyncKeeperConsumer.OraclePoolNotSet.selector);
         _submitReport();
 
         assertEq(swapHandler.syncCallCount(), 0, "must not sync");
@@ -1056,10 +1055,12 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
     function testOnReportUpkeepNotNeeded() public {
         _setPoolBalances(MIN_GHO_BALANCE, MIN_SGHO_BALANCE);
 
-        vm.expectEmit(true, true, true, true, address(consumer));
-        emit ISyncKeeperConsumer.SyncSkippedUpkeepNotNeeded(
-            MIN_GHO_BALANCE,
-            MIN_SGHO_BALANCE
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ISyncKeeperConsumer.SyncNotNeeded.selector,
+                MIN_GHO_BALANCE,
+                MIN_SGHO_BALANCE
+            )
         );
         _submitReport();
 
@@ -1070,10 +1071,12 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
     function testOnReportNoSurplus() public {
         _setPoolBalances(MIN_GHO_BALANCE - 1, MIN_SGHO_BALANCE - 1);
 
-        vm.expectEmit(true, true, true, true, address(consumer));
-        emit ISyncKeeperConsumer.SyncSkippedNoSurplus(
-            MIN_GHO_BALANCE - 1,
-            MIN_SGHO_BALANCE - 1
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ISyncKeeperConsumer.SyncNotNeeded.selector,
+                MIN_GHO_BALANCE - 1,
+                MIN_SGHO_BALANCE - 1
+            )
         );
         _submitReport();
 
@@ -1198,10 +1201,12 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
     function testOnReportSurplusExactlyAtFloorHasNothingToSend() public {
         _setPoolBalances(MIN_GHO_BALANCE - 1, MIN_SGHO_BALANCE);
 
-        vm.expectEmit(true, true, true, true, address(consumer));
-        emit ISyncKeeperConsumer.SyncSkippedNoSurplus(
-            MIN_GHO_BALANCE - 1,
-            MIN_SGHO_BALANCE
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ISyncKeeperConsumer.SyncNotNeeded.selector,
+                MIN_GHO_BALANCE - 1,
+                MIN_SGHO_BALANCE
+            )
         );
         _submitReport();
 
@@ -1209,17 +1214,19 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
     }
 
     /// @dev A surplus that exists but is below {minSyncAmount} does not justify a CCIP fee: the
-    ///      report skips instead of burning a full fee to ship dust.
+    ///      report reverts instead of burning a full fee to ship dust.
     function testOnReportSurplusBelowMinSyncAmountSkips() public {
         _setPoolBalances(
             MIN_GHO_BALANCE - 1,
             MIN_SGHO_BALANCE + MIN_SYNC_AMOUNT - 1
         );
 
-        vm.expectEmit(true, true, true, true, address(consumer));
-        emit ISyncKeeperConsumer.SyncSkippedNoSurplus(
-            MIN_GHO_BALANCE - 1,
-            MIN_SGHO_BALANCE + MIN_SYNC_AMOUNT - 1
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ISyncKeeperConsumer.SyncNotNeeded.selector,
+                MIN_GHO_BALANCE - 1,
+                MIN_SGHO_BALANCE + MIN_SYNC_AMOUNT - 1
+            )
         );
         _submitReport();
 
@@ -1273,13 +1280,12 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         consumer.onReport(_metadata(EXPECTED_AUTHOR), "");
     }
 
-    /// @dev A zero feed answer is treated as an unactionable state: skip and emit, never revert, so
-    ///      the report is not retried while the feed is down.
+    /// @dev A zero feed answer is treated as an unactionable state: the report reverts rather than
+    ///      deriving an unfair `minAmountOut`.
     function testOnReportZeroPriceSkips() public {
         feed.setAnswer(0);
 
-        vm.expectEmit(true, true, true, true, address(consumer));
-        emit ISyncKeeperConsumer.SyncSkippedStalePrice();
+        vm.expectRevert(ISyncKeeperConsumer.StalePrice.selector);
         _submitReport();
 
         assertEq(swapHandler.syncCallCount(), 0, "must not sync");
@@ -1288,8 +1294,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
     function testOnReportNegativePriceSkips() public {
         feed.setAnswer(-1);
 
-        vm.expectEmit(true, true, true, true, address(consumer));
-        emit ISyncKeeperConsumer.SyncSkippedStalePrice();
+        vm.expectRevert(ISyncKeeperConsumer.StalePrice.selector);
         _submitReport();
 
         assertEq(swapHandler.syncCallCount(), 0, "must not sync");
@@ -1298,8 +1303,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
     function testOnReportStalePriceSkips() public {
         feed.setUpdatedAt(block.timestamp - MAX_PRICE_STALENESS - 1);
 
-        vm.expectEmit(true, true, true, true, address(consumer));
-        emit ISyncKeeperConsumer.SyncSkippedStalePrice();
+        vm.expectRevert(ISyncKeeperConsumer.StalePrice.selector);
         _submitReport();
 
         assertEq(swapHandler.syncCallCount(), 0, "must not sync");
@@ -1314,23 +1318,23 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         assertEq(swapHandler.syncCallCount(), 1, "sync count");
     }
 
-    /// @dev A feed timestamped in the future is treated as unusable (skip), not an arithmetic panic.
+    /// @dev A feed timestamped in the future is treated as unusable (revert), not an arithmetic panic.
     function testOnReportFutureUpdatedAtSkips() public {
         feed.setUpdatedAt(block.timestamp + 1);
 
-        vm.expectEmit(true, true, true, true, address(consumer));
-        emit ISyncKeeperConsumer.SyncSkippedStalePrice();
+        vm.expectRevert(ISyncKeeperConsumer.StalePrice.selector);
         _submitReport();
 
         assertEq(swapHandler.syncCallCount(), 0, "must not sync");
     }
 
-    /// @dev The gate and executor share one price check: after a skipped report the feed can recover
+    /// @dev The gate and executor share one price check: after a rejected report the feed can recover
     ///      and the next report proceeds normally.
     function testOnReportProceedsAfterFeedRecovers() public {
         feed.setUpdatedAt(block.timestamp - MAX_PRICE_STALENESS - 1);
+        vm.expectRevert(ISyncKeeperConsumer.StalePrice.selector);
         _submitReport();
-        assertEq(swapHandler.syncCallCount(), 0, "skipped while stale");
+        assertEq(swapHandler.syncCallCount(), 0, "reverted while stale");
 
         feed.setUpdatedAt(block.timestamp);
         _submitReport();
@@ -1431,15 +1435,20 @@ contract CooldownTest is TestSyncKeeperConsumerBase {
         assertEq(consumer.lastSyncAt(), block.timestamp, "records timestamp");
     }
 
-    /// @dev A second report inside the window is skipped while the return leg settles.
+    /// @dev A second report inside the window reverts while the return leg settles.
     function testSecondSyncWithinWindowSkips() public {
         _submitReport();
         uint256 syncedAt = consumer.lastSyncAt();
 
         vm.warp(block.timestamp + WINDOW - 1);
 
-        vm.expectEmit(true, true, true, true, address(consumer));
-        emit ISyncKeeperConsumer.SyncSkippedCooldown(syncedAt, WINDOW);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ISyncKeeperConsumer.SyncInCooldown.selector,
+                syncedAt,
+                WINDOW
+            )
+        );
         _submitReport();
 
         assertEq(swapHandler.syncCallCount(), 1, "no second sync in window");
@@ -1463,12 +1472,19 @@ contract CooldownTest is TestSyncKeeperConsumerBase {
         assertEq(swapHandler.syncCallCount(), 2, "second sync after window");
     }
 
-    /// @dev A skipped report does not start a cooldown, so it cannot block a later real sync.
+    /// @dev A rejected report does not start a cooldown, so it cannot block a later real sync. Both
+    ///      sides are funded here, so the report reverts and must not set lastSyncAt.
     function testSkippedReportDoesNotStartCooldown() public {
-        // Both sides funded: the report is a no-op that must not set lastSyncAt.
         _setPoolBalances(MIN_GHO_BALANCE * 2, MIN_SGHO_BALANCE * 2);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ISyncKeeperConsumer.SyncNotNeeded.selector,
+                MIN_GHO_BALANCE * 2,
+                MIN_SGHO_BALANCE * 2
+            )
+        );
         _submitReport();
-        assertEq(consumer.lastSyncAt(), 0, "no-op leaves lastSyncAt unset");
+        assertEq(consumer.lastSyncAt(), 0, "rejected report leaves lastSyncAt unset");
 
         _setGhoShort();
         _submitReport();

@@ -317,7 +317,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         if (_inCooldown()) return false;
 
         // Apply the same price gate the executor applies, so the gate never signals a sync that
-        // {_processReport} would skip on a stale or invalid feed.
+        // {_processReport} would reject on a stale or invalid feed.
         uint256 amount = syncAmount < sendable ? syncAmount : sendable;
         (bool ok, ) = _quote(surplusToken, amount);
 
@@ -328,32 +328,29 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      * @dev Processes a validated report by rebalancing the oracle pool.
      * Both balances are re-read and the surplus token re-derived here rather than trusted from the
      * report, as the pool may have moved between the workflow read and the execution of the report.
-     * When no sync is possible the call is a no-op that emits the reason instead of reverting, so
-     * that the report is not retried. The body of the report is ignored.
+     * When no sync is possible the call reverts, since {needsUpkeep} already gated the report on the
+     * same checks and the CRE workflow does not retry a reverted report. The body of the report is
+     * ignored.
      *
      * The amount sent is {syncAmount} capped at what the surplus side holds above its own
      * threshold, so that `OraclePool.pull` can never revert for insufficient balance and a sync can
      * never flip the shortage over to the side it drew from. A surplus smaller than {minSyncAmount}
-     * is not worth a CCIP fee, so {_evaluatePool} reports no surplus and the call skips.
+     * is not worth a CCIP fee, so {_evaluatePool} reports no surplus and the call reverts with
+     * {SyncNotNeeded}.
      *
      * The counter-token received in exchange returns on a later, asynchronous CCIP message that is
      * invisible to the pool balances read here. To avoid stacking corrections on a pool that has not
      * yet been refilled, a sync starts a {settlementWindow} cooldown during which further reports
-     * emit {SyncSkippedCooldown} and return.
+     * revert with {SyncInCooldown}.
      *
-     * A stale or invalid price feed is treated as another unactionable state: the call emits
-     * {SyncSkippedStalePrice} and returns instead of reverting, so that the report is not retried
-     * while the feed is down. This mirrors {needsUpkeep}, which applies the same checks.
+     * A stale or invalid price feed is treated as another unactionable state: the call reverts with
+     * {StalePrice}. This mirrors {needsUpkeep}, which applies the same checks.
      *
-     * Emits a {SyncPerformed} event, or a {SyncSkippedOracleMisconfigured},
-     * {SyncSkippedUpkeepNotNeeded}, {SyncSkippedNoSurplus}, {SyncSkippedCooldown} or
-     * {SyncSkippedStalePrice} event if no sync is performed.
+     * Emits a {SyncPerformed} event, or reverts with {OraclePoolNotSet}, {SyncNotNeeded},
+     * {SyncInCooldown} or {StalePrice} if no sync is performed.
      */
     function _processReport(bytes calldata /* report */) internal override {
-        if (!_validateOracle()) {
-            emit SyncSkippedOracleMisconfigured();
-            return;
-        }
+        require(_validateOracle(), OraclePoolNotSet());
 
         (uint256 ghoBalance, uint256 sGhoBalance) = _poolBalances();
         (address surplusToken, uint256 sendable) = _evaluatePool(
@@ -361,28 +358,21 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
             sGhoBalance
         );
 
-        if (surplusToken == address(0)) {
-            if (ghoBalance < minGhoBalance || sGhoBalance < minSGhoBalance) {
-                emit SyncSkippedNoSurplus(ghoBalance, sGhoBalance);
-            } else {
-                emit SyncSkippedUpkeepNotNeeded(ghoBalance, sGhoBalance);
-            }
-            return;
-        }
+        require(
+            surplusToken != address(0),
+            SyncNotNeeded(ghoBalance, sGhoBalance)
+        );
 
-        if (_inCooldown()) {
-            emit SyncSkippedCooldown(lastSyncAt, settlementWindow);
-            return;
-        }
+        require(
+            !_inCooldown(),
+            SyncInCooldown(lastSyncAt, settlementWindow)
+        );
 
         uint256 amount = syncAmount;
         if (amount > sendable) amount = sendable;
 
         (bool ok, uint256 minAmountOut) = _quote(surplusToken, amount);
-        if (!ok) {
-            emit SyncSkippedStalePrice();
-            return;
-        }
+        require(ok, StalePrice());
 
         bytes memory feeMem = _feeData;
         (uint128 maxFee, bool payInGho, ) = _decodeAndValidateFeeData(feeMem);
@@ -549,8 +539,8 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      *
      * The price feed is the single precondition that {needsUpkeep} cannot check by reading balances
      * alone, so it is validated here and this helper is shared by both the gate and the executor:
-     * the gate calls it to avoid signalling a sync the executor would skip, and the executor calls
-     * it to decide between performing the sync and emitting {SyncSkippedStalePrice}. Because both
+     * the gate calls it to avoid signalling a sync the executor would reject, and the executor calls
+     * it to decide between performing the sync and reverting with {StalePrice}. Because both
      * callers run identical logic, the gate and the executor cannot disagree on whether a sync is
      * possible. A feed answer that is non-positive, stale, or timestamped in the future yields
      * `ok == false` rather than a revert, upholding the no-revert-so-no-retry design.
