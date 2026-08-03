@@ -12,13 +12,6 @@ pragma solidity ^0.8.20;
  */
 interface ISyncKeeperConsumer {
     /**
-     * @dev The encoded fee data is shorter than the three ABI words it must decode to.
-     * @param length The length of the provided fee data.
-     * @param minLength The minimum length required to decode the fee data.
-     */
-    error FeeOtoDTooShort(uint256 length, uint256 minLength);
-
-    /**
      * @dev The `gasLimit` passed to {setExtraArgs} is below {MIN_PROCESS_MESSAGE_GAS}.
      */
     error InvalidGasLimit();
@@ -79,14 +72,14 @@ interface ISyncKeeperConsumer {
 
     /**
      * Emitted when the CCIP fee data is updated.
-     * @param maxFeeOtoD The maximum CCIP fee allowed for the origin to destination message.
-     * @param payInGhoOtoD Whether the fee is paid in `GHO` (`true`) or in native token (`false`).
-     * @param gasLimitOtoD The gas limit for executing the message on the destination chain.
+     * @param maxFee The maximum CCIP fee allowed for the origin to destination message.
+     * @param payInGho Whether the fee is paid in `GHO` (`true`) or in native token (`false`).
+     * @param gasLimit The gas limit for executing the message on the destination chain.
      */
-    event FeeOtoDUpdated(
-        uint128 indexed maxFeeOtoD,
-        bool indexed payInGhoOtoD,
-        uint32 indexed gasLimitOtoD
+    event FeeDataUpdated(
+        uint128 indexed maxFee,
+        bool indexed payInGho,
+        uint32 indexed gasLimit
     );
 
     /**
@@ -248,22 +241,22 @@ interface ISyncKeeperConsumer {
     function setSettlementWindow(uint256 newWindow) external;
 
     /**
-     * @dev Sets the CCIP fee data forwarded to `SwapHandler.sync`.
-     * The fee data is the encoding of `(uint128 maxFeeOtoD, bool payInGhoOtoD, uint32 gasLimitOtoD)`.
+     * @dev Sets the CCIP fee data forwarded to `SwapHandler.sync`, encoded via {FeeCodec}.
      * When the fee is paid in native token, this contract must hold enough native token to cover
-     * `maxFeeOtoD` on each sync.
+     * `maxFee` on each sync.
      *
      * Requirements:
      *
      * - `msg.sender` must be the owner.
-     * - `newFee` must be at least 96 bytes long.
-     * - The gas limit encoded in `newFee` must be at least {MIN_PROCESS_MESSAGE_GAS}.
+     * - `gasLimit` must be at least {MIN_PROCESS_MESSAGE_GAS}.
      *
-     * Emits a {FeeOtoDUpdated} event.
+     * Emits a {FeeDataUpdated} event.
      *
-     * @param newFee The new encoded CCIP fee data.
+     * @param maxFee The maximum CCIP fee allowed for the origin to destination message.
+     * @param payInGho Whether the fee is paid in `GHO` (`true`) or in native token (`false`).
+     * @param gasLimit The gas limit for executing the message on the destination chain.
      */
-    function setFeeOtoD(bytes calldata newFee) external;
+    function setFeeData(uint128 maxFee, bool payInGho, uint32 gasLimit) external;
 
     /**
      * @dev Sets the price feed used to convert the synced amount to the opposite token.
@@ -356,7 +349,7 @@ interface ISyncKeeperConsumer {
     /**
      * @notice Returns the encoded CCIP fee data forwarded to `SwapHandler.sync`.
      */
-    function feeOtoD() external view returns (bytes memory);
+    function feeData() external view returns (bytes memory);
 
     /**
      * @notice Returns the encoded extra arguments forwarded to the CCIP router.

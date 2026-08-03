@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {ISwapHandler} from "../../src/interfaces/ISwapHandler.sol";
+import {FeeCodec} from "../../src/libraries/FeeCodec.sol";
 
 /// @dev Records the arguments of the last {sync} call so tests can assert on them. When the fee data
 ///      says to pay in `GHO`, it pulls the fee from the caller like the real `SwapHandler`, so the
@@ -48,10 +49,7 @@ contract MockSwapHandler is ISwapHandler {
         bytes calldata feeData,
         bytes calldata extraArgs
     ) external payable override returns (bytes32 messageId) {
-        (uint128 maxFee, bool payInGho, ) = abi.decode(
-            feeData,
-            (uint128, bool, uint32)
-        );
+        (uint128 maxFee, bool payInGho, ) = FeeCodec.decodeCCIP(feeData);
         if (payInGho) {
             IERC20(GHO).transferFrom(msg.sender, address(this), maxFee);
         }

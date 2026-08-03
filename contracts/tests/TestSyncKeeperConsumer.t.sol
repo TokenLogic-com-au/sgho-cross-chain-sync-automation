@@ -10,6 +10,7 @@ import {IERC165} from "../src/interfaces/IERC165.sol";
 import {IReceiver} from "../src/interfaces/IReceiver.sol";
 import {ISyncKeeperConsumer} from "../src/interfaces/ISyncKeeperConsumer.sol";
 import {ExtraArgsCodec} from "../src/libraries/ExtraArgsCodec.sol";
+import {FeeCodec} from "../src/libraries/FeeCodec.sol";
 import {FinalityCodec} from "../src/libraries/FinalityCodec.sol";
 import {MockAggregatorV3} from "./mocks/MockAggregatorV3.sol";
 import {MockSwapHandler} from "./mocks/MockSwapHandler.sol";
@@ -74,7 +75,7 @@ contract TestSyncKeeperConsumerBase is Test {
         bool payInGho,
         uint32 gasLimit
     ) internal pure returns (bytes memory) {
-        return abi.encode(maxFee, payInGho, gasLimit);
+        return FeeCodec.encodeCCIP(maxFee, payInGho, gasLimit);
     }
 
     /// @dev The default fee data pays the CCIP fee in native token.
@@ -327,14 +328,14 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         );
     }
 
-    function testConstructorFeeOtoDTooShort() public {
-        bytes memory shortFee = abi.encode(MAX_FEE, false);
+    function testConstructorFeeDataTooShort() public {
+        bytes memory shortFee = abi.encodePacked(MAX_FEE);
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                ISyncKeeperConsumer.FeeOtoDTooShort.selector,
+                FeeCodec.FeeCodecInvalidDataLength.selector,
                 shortFee.length,
-                96
+                21
             )
         );
         _deploy(
@@ -391,7 +392,7 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         assertEq(c.minSyncAmount(), MIN_SYNC_AMOUNT, "minSyncAmount");
         assertEq(c.settlementWindow(), SETTLEMENT_WINDOW, "settlementWindow");
         assertEq(c.lastSyncAt(), 0, "lastSyncAt");
-        assertEq(c.feeOtoD(), _defaultFeeData(), "feeOtoD");
+        assertEq(c.feeData(), _defaultFeeData(), "feeData");
         assertEq(c.MIN_PROCESS_MESSAGE_GAS(), 400_000, "minProcessMessageGas");
     }
 
@@ -617,12 +618,12 @@ contract SetSettlementWindowTest is TestSyncKeeperConsumerBase {
 }
 
 /**
- * @title SetFeeOtoDTest
- * @notice Unit tests for SyncKeeperConsumer.setFeeOtoD
- * @dev Run with: forge test --match-contract SetFeeOtoDTest -vvv
+ * @title SetFeeDataTest
+ * @notice Unit tests for SyncKeeperConsumer.setFeeData
+ * @dev Run with: forge test --match-contract SetFeeDataTest -vvv
  */
-contract SetFeeOtoDTest is TestSyncKeeperConsumerBase {
-    function testSetFeeOtoDNonOwner() public {
+contract SetFeeDataTest is TestSyncKeeperConsumerBase {
+    function testSetFeeDataNonOwner() public {
         vm.prank(USER);
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -630,23 +631,10 @@ contract SetFeeOtoDTest is TestSyncKeeperConsumerBase {
                 USER
             )
         );
-        consumer.setFeeOtoD(_defaultFeeData());
+        consumer.setFeeData(MAX_FEE, false, GAS_LIMIT);
     }
 
-    function testSetFeeOtoDTooShort() public {
-        bytes memory shortFee = abi.encode(MAX_FEE, false);
-
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                ISyncKeeperConsumer.FeeOtoDTooShort.selector,
-                shortFee.length,
-                96
-            )
-        );
-        consumer.setFeeOtoD(shortFee);
-    }
-
-    function testSetFeeOtoDInsufficientGasLimit() public {
+    function testSetFeeDataInsufficientGasLimit() public {
         uint32 minGas = consumer.MIN_PROCESS_MESSAGE_GAS();
         uint32 tooLittleGas = minGas - 1;
 
@@ -657,26 +645,28 @@ contract SetFeeOtoDTest is TestSyncKeeperConsumerBase {
                 minGas
             )
         );
-        consumer.setFeeOtoD(_feeData(MAX_FEE, false, tooLittleGas));
+        consumer.setFeeData(MAX_FEE, false, tooLittleGas);
     }
 
-    function testSetFeeOtoDAtMinimumGasLimit() public {
+    function testSetFeeDataAtMinimumGasLimit() public {
         uint32 minGas = consumer.MIN_PROCESS_MESSAGE_GAS();
-        bytes memory newFee = _feeData(MAX_FEE, false, minGas);
-        consumer.setFeeOtoD(newFee);
+        consumer.setFeeData(MAX_FEE, false, minGas);
 
-        assertEq(consumer.feeOtoD(), newFee, "minimum gas limit accepted");
+        assertEq(
+            consumer.feeData(),
+            _feeData(MAX_FEE, false, minGas),
+            "minimum gas limit accepted"
+        );
     }
 
-    function testSetFeeOtoD() public {
+    function testSetFeeData() public {
         uint128 newMaxFee = 2 ether;
-        bytes memory newFee = _feeData(newMaxFee, true, GAS_LIMIT);
 
         vm.expectEmit(true, true, true, true, address(consumer));
-        emit ISyncKeeperConsumer.FeeOtoDUpdated(newMaxFee, true, GAS_LIMIT);
-        consumer.setFeeOtoD(newFee);
+        emit ISyncKeeperConsumer.FeeDataUpdated(newMaxFee, true, GAS_LIMIT);
+        consumer.setFeeData(newMaxFee, true, GAS_LIMIT);
 
-        assertEq(consumer.feeOtoD(), newFee);
+        assertEq(consumer.feeData(), _feeData(newMaxFee, true, GAS_LIMIT));
     }
 }
 
@@ -1173,7 +1163,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
     /// @dev Paying the fee in GHO: the SwapHandler pulls it from the consumer, which works because
     ///      the consumer approved the sender at construction and is funded with GHO here.
     function testOnReportSyncsPayingInGho() public {
-        consumer.setFeeOtoD(_feeData(MAX_FEE, true, GAS_LIMIT));
+        consumer.setFeeData(MAX_FEE, true, GAS_LIMIT);
         gho.mint(address(consumer), MAX_FEE);
 
         _submitReport();
@@ -1204,7 +1194,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
 
     /// @dev Paying in GHO still fails cleanly if the operator has not funded the consumer with GHO.
     function testOnReportPayingInGhoRevertsWithoutGho() public {
-        consumer.setFeeOtoD(_feeData(MAX_FEE, true, GAS_LIMIT));
+        consumer.setFeeData(MAX_FEE, true, GAS_LIMIT);
         // No GHO minted to the consumer.
 
         vm.prank(FORWARDER);

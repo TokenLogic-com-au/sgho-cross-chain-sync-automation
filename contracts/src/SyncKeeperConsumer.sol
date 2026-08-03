@@ -6,6 +6,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 import {ReceiverTemplate} from "./ReceiverTemplate.sol";
 import {ExtraArgsCodec} from "./libraries/ExtraArgsCodec.sol";
+import {FeeCodec} from "./libraries/FeeCodec.sol";
 import {FinalityCodec} from "./libraries/FinalityCodec.sol";
 import {IAggregatorV3} from "./interfaces/IAggregatorV3.sol";
 import {ISwapHandler} from "./interfaces/ISwapHandler.sol";
@@ -38,7 +39,7 @@ import {ISyncKeeperConsumer} from "./interfaces/ISyncKeeperConsumer.sol";
  *
  * {SWAP_HANDLER}, {GHO} and {SGHO} are immutable and cached from the `SwapHandler` at
  * construction. The thresholds ({minGhoBalance}, {minSGhoBalance}), the sync parameters
- * ({syncAmount}, {minSyncAmount}, {settlementWindow}, {feeOtoD}) and the feed configuration
+ * ({syncAmount}, {minSyncAmount}, {settlementWindow}, {feeData}) and the feed configuration
  * ({priceFeed}, {maxPriceStaleness}) are owner-updatable.
  */
 contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
@@ -81,7 +82,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     uint256 public lastSyncAt;
 
     /// @dev The encoded CCIP fee data forwarded to `SwapHandler.sync`.
-    bytes private _feeOtoD;
+    bytes private _feeData;
 
     /// @dev The encoded extra arguments forwarded to the CCIP router.
     bytes private _extraArgs = "";
@@ -96,8 +97,8 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      * - The oracle pool, `GHO` and `SGHO` of `swapHandler_` must not be the zero address.
      * - `minGhoBalance_`, `minSGhoBalance_`, `syncAmount_` and `minSyncAmount_` must be greater than
      *   0.
-     * - `feeOtoD_` must be at least 96 bytes long and encode a gas limit of at least
-     *   {MIN_PROCESS_MESSAGE_GAS}.
+     * - `feeData_` must be a {FeeCodec}-encoded CCIP fee (at least 21 bytes) whose gas limit is at
+     *   least {MIN_PROCESS_MESSAGE_GAS}.
      *
      * `expectedAuthor_` pins the workflow owner whose reports {onReport} accepts, so that a report
      * from another workflow sharing the same forwarder cannot trigger a sync. It is required at
@@ -118,7 +119,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      * @param syncAmount_ The maximum amount of the surplus token sent on each sync.
      * @param minSyncAmount_ The minimum surplus above threshold required to perform a sync.
      * @param settlementWindow_ The minimum delay between syncs, in seconds (0 disables it).
-     * @param feeOtoD_ The encoded CCIP fee data.
+     * @param feeData_ The encoded CCIP fee data.
      */
     constructor(
         address forwarder,
@@ -131,7 +132,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         uint256 syncAmount_,
         uint256 minSyncAmount_,
         uint256 settlementWindow_,
-        bytes memory feeOtoD_
+        bytes memory feeData_
     ) ReceiverTemplate(forwarder) {
         require(
             priceFeed_ != address(0) && expectedAuthor_ != address(0),
@@ -146,7 +147,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
             ZeroAmount()
         );
 
-        _decodeAndValidateFeeOtoD(feeOtoD_);
+        _decodeAndValidateFeeData(feeData_);
         _setExpectedAuthor(expectedAuthor_);
 
         (address gho, address sGho) = _readAndValidateSender(swapHandler_);
@@ -161,7 +162,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         syncAmount = syncAmount_;
         minSyncAmount = minSyncAmount_;
         settlementWindow = settlementWindow_;
-        _feeOtoD = feeOtoD_;
+        _feeData = feeData_;
 
         IERC20(gho).forceApprove(swapHandler_, type(uint256).max);
     }
@@ -236,16 +237,19 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function setFeeOtoD(bytes calldata newFee) external onlyOwner {
-        (
-            uint128 maxFeeOtoD,
-            bool payInGhoOtoD,
-            uint32 gasLimitOtoD
-        ) = _decodeAndValidateFeeOtoD(newFee);
+    function setFeeData(
+        uint128 maxFee,
+        bool payInGho,
+        uint32 gasLimit
+    ) external onlyOwner {
+        require(
+            gasLimit >= MIN_PROCESS_MESSAGE_GAS,
+            InsufficientGasLimit(gasLimit, MIN_PROCESS_MESSAGE_GAS)
+        );
 
-        _feeOtoD = newFee;
+        _feeData = FeeCodec.encodeCCIP(maxFee, payInGho, gasLimit);
 
-        emit FeeOtoDUpdated(maxFeeOtoD, payInGhoOtoD, gasLimitOtoD);
+        emit FeeDataUpdated(maxFee, payInGho, gasLimit);
     }
 
     /// @inheritdoc ISyncKeeperConsumer
@@ -267,8 +271,8 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /// @inheritdoc ISyncKeeperConsumer
-    function feeOtoD() external view returns (bytes memory) {
-        return _feeOtoD;
+    function feeData() external view returns (bytes memory) {
+        return _feeData;
     }
 
     /// @inheritdoc ISyncKeeperConsumer
@@ -359,11 +363,11 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
             return;
         }
 
-        bytes memory feeMem = _feeOtoD;
-        (uint128 maxFeeOtoD, bool payInGhoOtoD, ) = _decodeAndValidateFeeOtoD(
+        bytes memory feeMem = _feeData;
+        (uint128 maxFee, bool payInGho, ) = _decodeAndValidateFeeData(
             feeMem
         );
-        uint256 nativeAmount = payInGhoOtoD ? 0 : uint256(maxFeeOtoD);
+        uint256 nativeAmount = payInGho ? 0 : uint256(maxFee);
 
         lastSyncAt = block.timestamp;
 
@@ -486,11 +490,11 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /**
-     * @dev Decodes and validates the encoded CCIP fee data.
+     * @dev Decodes and validates the {FeeCodec}-encoded CCIP fee data.
      *
      * Requirements:
      *
-     * - `fee` must be at least 96 bytes long, the length of the three ABI words it decodes to.
+     * - `fee` must be a {FeeCodec}-encoded CCIP fee (at least 21 bytes).
      * - The gas limit encoded in `fee` must be at least {MIN_PROCESS_MESSAGE_GAS}.
      *
      * @param fee The encoded CCIP fee data.
@@ -498,19 +502,18 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      * @return Whether the fee is paid in `GHO` (`true`) or in native token (`false`).
      * @return The gas limit for executing the message on the destination chain.
      */
-    function _decodeAndValidateFeeOtoD(
+    function _decodeAndValidateFeeData(
         bytes memory fee
     ) private pure returns (uint128, bool, uint32) {
-        require(fee.length >= 96, FeeOtoDTooShort(fee.length, 96));
-        (uint128 maxFeeOtoD, bool payInGhoOtoD, uint32 gasLimitOtoD) = abi
-            .decode(fee, (uint128, bool, uint32));
+        (uint128 maxFee, bool payInGho, uint32 gasLimit) = FeeCodec
+            .decodeCCIPMemory(fee);
 
         require(
-            gasLimitOtoD >= MIN_PROCESS_MESSAGE_GAS,
-            InsufficientGasLimit(gasLimitOtoD, MIN_PROCESS_MESSAGE_GAS)
+            gasLimit >= MIN_PROCESS_MESSAGE_GAS,
+            InsufficientGasLimit(gasLimit, MIN_PROCESS_MESSAGE_GAS)
         );
 
-        return (maxFeeOtoD, payInGhoOtoD, gasLimitOtoD);
+        return (maxFee, payInGho, gasLimit);
     }
 
     /**
