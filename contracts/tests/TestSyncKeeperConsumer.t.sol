@@ -141,20 +141,25 @@ contract TestSyncKeeperConsumerBase is Test {
         consumer.onReport(_metadata(EXPECTED_AUTHOR), "");
     }
 
-    /// @dev Sending GHO returns sGHO shares: divide by the GHO-per-share rate.
+    /// @dev Reduces `amount` by the consumer's slippage tolerance, matching {SyncKeeperConsumer._quote}.
+    function _applySlippage(uint256 amount) internal view returns (uint256) {
+        return (amount * (10_000 - consumer.slippageToleranceBps())) / 10_000;
+    }
+
+    /// @dev Sending GHO returns sGHO shares: divide by the GHO-per-share rate, then apply slippage.
     function _expectedSGhoOut(
         uint256 ghoAmount,
         int256 answer
-    ) internal pure returns (uint256) {
-        return (ghoAmount * (10 ** FEED_DECIMALS)) / uint256(answer);
+    ) internal view returns (uint256) {
+        return _applySlippage((ghoAmount * (10 ** FEED_DECIMALS)) / uint256(answer));
     }
 
-    /// @dev Sending sGHO returns GHO assets: multiply by the GHO-per-share rate.
+    /// @dev Sending sGHO returns GHO assets: multiply by the GHO-per-share rate, then apply slippage.
     function _expectedGhoOut(
         uint256 sGhoAmount,
         int256 answer
-    ) internal pure returns (uint256) {
-        return (sGhoAmount * uint256(answer)) / (10 ** FEED_DECIMALS);
+    ) internal view returns (uint256) {
+        return _applySlippage((sGhoAmount * uint256(answer)) / (10 ** FEED_DECIMALS));
     }
 }
 
@@ -391,6 +396,7 @@ contract ConstructorTest is TestSyncKeeperConsumerBase {
         assertEq(c.syncAmount(), SYNC_AMOUNT, "syncAmount");
         assertEq(c.minSyncAmount(), MIN_SYNC_AMOUNT, "minSyncAmount");
         assertEq(c.settlementWindow(), SETTLEMENT_WINDOW, "settlementWindow");
+        assertEq(c.slippageToleranceBps(), 200, "slippageToleranceBps");
         assertEq(c.lastSyncAt(), 0, "lastSyncAt");
         assertEq(c.feeData(), _defaultFeeData(), "feeData");
         assertEq(c.MIN_PROCESS_MESSAGE_GAS(), 400_000, "minProcessMessageGas");
@@ -833,6 +839,62 @@ contract SetMaxPriceStalenessTest is TestSyncKeeperConsumerBase {
 }
 
 /**
+ * @title SetSlippageToleranceTest
+ * @notice Unit tests for SyncKeeperConsumer.setSlippageTolerance
+ * @dev Run with: forge test --match-contract SetSlippageToleranceTest -vvv
+ */
+contract SetSlippageToleranceTest is TestSyncKeeperConsumerBase {
+    function testSetSlippageToleranceNonOwner() public {
+        vm.prank(USER);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                Ownable.OwnableUnauthorizedAccount.selector,
+                USER
+            )
+        );
+        consumer.setSlippageTolerance(100);
+    }
+
+    function testSetSlippageToleranceTooHigh() public {
+        vm.expectRevert(
+            ISyncKeeperConsumer.InvalidSlippageTolerance.selector
+        );
+        consumer.setSlippageTolerance(10_000 + 1);
+    }
+
+    /// @dev 100% is the boundary: it is accepted, and drops the floor to zero.
+    function testSetSlippageToleranceAtMax() public {
+        consumer.setSlippageTolerance(10_000);
+        assertEq(consumer.slippageToleranceBps(), 10_000, "100% accepted");
+    }
+
+    function testSetSlippageTolerance() public {
+        uint256 newValue = 250;
+
+        vm.expectEmit(true, true, true, true, address(consumer));
+        emit ISyncKeeperConsumer.SlippageToleranceUpdated(200, newValue);
+        consumer.setSlippageTolerance(newValue);
+
+        assertEq(consumer.slippageToleranceBps(), newValue);
+    }
+
+    /// @dev The tolerance lowers the vault's floor: at 10% and parity, SYNC_AMOUNT of GHO quotes to
+    ///      SYNC_AMOUNT of sGHO, less 10%.
+    function testOnReportAppliesSlippageToleranceToMinOut() public {
+        vm.deal(address(consumer), MAX_FEE);
+        consumer.setSlippageTolerance(1_000);
+        _setSGhoShort();
+        _submitReport();
+
+        assertEq(
+            swapHandler.lastMinAmountOut(),
+            (SYNC_AMOUNT * 9_000) / 10_000,
+            "minAmountOut reduced by the 10% tolerance"
+        );
+    }
+}
+
+/**
  * @title NeedsUpkeepTest
  * @notice Unit tests for SyncKeeperConsumer.needsUpkeep across all four pool states
  * @dev Run with: forge test --match-contract NeedsUpkeepTest -vvv
@@ -1070,7 +1132,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         _submitReport();
         assertEq(
             swapHandler.lastMinAmountOut(),
-            SYNC_AMOUNT * 2,
+            _applySlippage(SYNC_AMOUNT * 2),
             "sGHO -> GHO multiplies"
         );
 
@@ -1078,7 +1140,7 @@ contract OnReportTest is TestSyncKeeperConsumerBase {
         _submitReport();
         assertEq(
             swapHandler.lastMinAmountOut(),
-            SYNC_AMOUNT / 2,
+            _applySlippage(SYNC_AMOUNT / 2),
             "GHO -> sGHO divides"
         );
     }

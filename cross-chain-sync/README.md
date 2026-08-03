@@ -84,6 +84,7 @@ Validated by [`config.ts`](config.ts). All addresses are checksummed `0x` + 40 h
 - **`minSyncAmount`** — the minimum surplus above threshold worth a sync; a smaller imbalance is skipped so dust does not spend a CCIP fee. Update with `setMinSyncAmount` (owner, non-zero).
 - **`settlementWindow`** — cooldown (seconds) after a sync during which further reports are skipped while the CCIP return leg settles; `0` disables it. Update with `setSettlementWindow` (owner).
 - **`priceFeed` / `maxPriceStaleness`** — the sGHO/GHO exchange-rate feed used to price `minAmountOut`, and the maximum tolerated age of its answer. Update with `setPriceFeed` / `setMaxPriceStaleness` (owner).
+- **`slippageToleranceBps`** — slippage tolerance (basis points) subtracted from the quoted `minAmountOut`. The sGHO ERC4626 vault keeps accruing while the sync settles over CCIP, so the mainnet deposit leg mints against a slightly higher rate than quoted; this buffer stops it reverting with `MinimumOutputNotMet`. Defaults to **200 (2%)**; update with `setSlippageTolerance(uint256)` (owner, ≤ 10_000).
 - **`feeData`** — CCIP fee blob, `FeeCodec.encodeCCIP`-packed (21 bytes), set in the constructor; update with `setFeeData(uint128 maxFee, bool payInGho, uint32 gasLimit)` (owner) when fee caps or gas limits need to change.
 
 ### `project.yaml` (repo root)
@@ -166,6 +167,7 @@ export MIN_SGHO_BALANCE_WEI="1000000000000000000000"               # SGHO thresh
 export SYNC_AMOUNT_WEI="1000000000000000000"                        # max surplus token sent per sync (wei)
 export MIN_SYNC_AMOUNT_WEI="100000000000000000"                    # minimum surplus worth a sync (wei, non-zero)
 export SETTLEMENT_WINDOW="0"                                        # cooldown seconds between syncs (0 disables)
+export SLIPPAGE_TOLERANCE_BPS="200"                                 # slippage tolerance on minAmountOut, in bps (2%); post-deploy setter only
 export MAX_FEE_WEI="100000000000000000"                            # max CCIP fee per sync (wei)
 export PAY_IN_GHO="false"                                          # pay the CCIP fee in GHO (true) or native token (false)
 export CCIP_GAS_LIMIT="500000"                                     # destination gas limit (must be >= MIN_PROCESS_MESSAGE_GAS)
@@ -220,6 +222,7 @@ cast send "$CONSUMER_ADDRESS" "setMinSyncAmount(uint256)"   "$MIN_SYNC_AMOUNT_WE
 cast send "$CONSUMER_ADDRESS" "setSettlementWindow(uint256)" "$SETTLEMENT_WINDOW"   --rpc-url "$SEPOLIA_RPC_URL" --private-key "$OWNER_PRIVATE_KEY"
 cast send "$CONSUMER_ADDRESS" "setPriceFeed(address)"       "$PRICE_FEED"           --rpc-url "$SEPOLIA_RPC_URL" --private-key "$OWNER_PRIVATE_KEY"
 cast send "$CONSUMER_ADDRESS" "setMaxPriceStaleness(uint256)" "$MAX_PRICE_STALENESS" --rpc-url "$SEPOLIA_RPC_URL" --private-key "$OWNER_PRIVATE_KEY"
+cast send "$CONSUMER_ADDRESS" "setSlippageTolerance(uint256)" "$SLIPPAGE_TOLERANCE_BPS" --rpc-url "$SEPOLIA_RPC_URL" --private-key "$OWNER_PRIVATE_KEY"
 cast send "$CONSUMER_ADDRESS" "setFeeData(uint128,bool,uint32)" "$MAX_FEE_WEI" "$PAY_IN_GHO" "$CCIP_GAS_LIMIT" --rpc-url "$SEPOLIA_RPC_URL" --private-key "$OWNER_PRIVATE_KEY"
 ```
 

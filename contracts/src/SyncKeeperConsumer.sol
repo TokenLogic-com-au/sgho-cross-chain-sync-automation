@@ -48,6 +48,9 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     /// @inheritdoc ISyncKeeperConsumer
     uint32 public constant MIN_PROCESS_MESSAGE_GAS = 400_000;
 
+    /// @dev Basis-point denominator representing 100%.
+    uint256 private constant MAX_BPS = 10_000;
+
     /// @inheritdoc ISyncKeeperConsumer
     address public immutable SWAP_HANDLER;
 
@@ -77,6 +80,9 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
 
     /// @inheritdoc ISyncKeeperConsumer
     uint256 public settlementWindow;
+
+    /// @inheritdoc ISyncKeeperConsumer
+    uint256 public slippageToleranceBps;
 
     /// @inheritdoc ISyncKeeperConsumer
     uint256 public lastSyncAt;
@@ -162,6 +168,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         syncAmount = syncAmount_;
         minSyncAmount = minSyncAmount_;
         settlementWindow = settlementWindow_;
+        slippageToleranceBps = 200; // 2% default
         _feeData = feeData_;
 
         IERC20(gho).forceApprove(swapHandler_, type(uint256).max);
@@ -271,6 +278,16 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /// @inheritdoc ISyncKeeperConsumer
+    function setSlippageTolerance(uint256 newToleranceBps) external onlyOwner {
+        require(newToleranceBps <= MAX_BPS, InvalidSlippageTolerance());
+
+        uint256 previousTolerance = slippageToleranceBps;
+        slippageToleranceBps = newToleranceBps;
+
+        emit SlippageToleranceUpdated(previousTolerance, newToleranceBps);
+    }
+
+    /// @inheritdoc ISyncKeeperConsumer
     function feeData() external view returns (bytes memory) {
         return _feeData;
     }
@@ -364,9 +381,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         }
 
         bytes memory feeMem = _feeData;
-        (uint128 maxFee, bool payInGho, ) = _decodeAndValidateFeeData(
-            feeMem
-        );
+        (uint128 maxFee, bool payInGho, ) = _decodeAndValidateFeeData(feeMem);
         uint256 nativeAmount = payInGho ? 0 : uint256(maxFee);
 
         lastSyncAt = block.timestamp;
@@ -523,7 +538,10 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      * The feed answer is the amount of `GHO` assets per 1 `SGHO` share, scaled by
      * `10 ** feed.decimals()`, so the conversion runs in opposite directions per token: sending
      * `GHO` divides by the rate to get `SGHO` shares, sending `SGHO` multiplies by it to get `GHO`
-     * assets.
+     * assets. The result is then reduced by {slippageToleranceBps}: the `SGHO` vault is an ERC4626
+     * whose exchange rate keeps accruing while the sync settles over CCIP, so the mainnet vault mints
+     * against a higher rate than quoted here; without this buffer the `GHO`-to-`SGHO` deposit leg
+     * would revert with `MinimumOutputNotMet` and force a cross-chain refund.
      *
      * The price feed is the single precondition that {needsUpkeep} cannot check by reading balances
      * alone, so it is validated here and this helper is shared by both the gate and the executor:
@@ -536,7 +554,8 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      * @param tokenIn The address of the token being sent, either `GHO` or `SGHO`.
      * @param amountIn The amount of `tokenIn` being sent.
      * @return Whether the feed answer is usable (positive and within {maxPriceStaleness}).
-     * @return The equivalent amount of the opposite token, or 0 when the first return is false.
+     * @return The equivalent amount of the opposite token less {slippageToleranceBps}, or 0 when the
+     *         first return is false.
      */
     function _quote(
         address tokenIn,
@@ -556,9 +575,12 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         uint256 rate = uint256(answer);
         uint256 scale = 10 ** feed.decimals();
 
-        uint256 minAmountOut = tokenIn == GHO
+        uint256 expectedOut = tokenIn == GHO
             ? (amountIn * scale) / rate
             : (amountIn * rate) / scale;
+
+        uint256 minAmountOut = (expectedOut *
+            (MAX_BPS - slippageToleranceBps)) / MAX_BPS;
         bool ok = true;
 
         return (ok, minAmountOut);

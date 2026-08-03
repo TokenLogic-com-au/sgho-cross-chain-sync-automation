@@ -23,6 +23,11 @@ interface ISyncKeeperConsumer {
      */
     error InsufficientGasLimit(uint32 gasLimit, uint32 minGas);
 
+    /**
+     * @dev The slippage tolerance passed to {setSlippageTolerance} exceeds 100% (`MAX_BPS`).
+     */
+    error InvalidSlippageTolerance();
+
     /// @dev A required address parameter is the zero address.
     error ZeroAddress();
 
@@ -95,6 +100,13 @@ interface ISyncKeeperConsumer {
      * @param current The new maximum price staleness.
      */
     event MaxPriceStalenessUpdated(uint256 previous, uint256 current);
+
+    /**
+     * Emitted when the slippage tolerance is updated.
+     * @param previous The previous slippage tolerance, in basis points.
+     * @param current The new slippage tolerance, in basis points.
+     */
+    event SlippageToleranceUpdated(uint256 previous, uint256 current);
 
     /**
      * Emitted when the oracle pool is rebalanced.
@@ -256,7 +268,11 @@ interface ISyncKeeperConsumer {
      * @param payInGho Whether the fee is paid in `GHO` (`true`) or in native token (`false`).
      * @param gasLimit The gas limit for executing the message on the destination chain.
      */
-    function setFeeData(uint128 maxFee, bool payInGho, uint32 gasLimit) external;
+    function setFeeData(
+        uint128 maxFee,
+        bool payInGho,
+        uint32 gasLimit
+    ) external;
 
     /**
      * @dev Sets the price feed used to convert the synced amount to the opposite token.
@@ -285,6 +301,23 @@ interface ISyncKeeperConsumer {
      * @param newStaleness The new maximum price staleness, in seconds.
      */
     function setMaxPriceStaleness(uint256 newStaleness) external;
+
+    /**
+     * @dev Sets the slippage tolerance applied to the sync `minAmountOut`, in basis points. The
+     * quoted output is reduced by this tolerance so that the `SGHO` vault's exchange-rate accrual
+     * during CCIP settlement does not push the actual output below the floor and revert the deposit
+     * leg. It bounds how much worse than the quote a sync will accept, so it should stay small.
+     *
+     * Requirements:
+     *
+     * - `msg.sender` must be the owner.
+     * - `newToleranceBps` must not exceed 10_000 (100%).
+     *
+     * Emits a {SlippageToleranceUpdated} event.
+     *
+     * @param newToleranceBps The new slippage tolerance, in basis points.
+     */
+    function setSlippageTolerance(uint256 newToleranceBps) external;
 
     /**
      * @notice Returns the minimum gas required to process the CCIP message on the destination chain.
@@ -340,6 +373,11 @@ interface ISyncKeeperConsumer {
      * @notice Returns the minimum delay between syncs, in seconds (0 if the cooldown is disabled).
      */
     function settlementWindow() external view returns (uint256);
+
+    /**
+     * @notice Returns the slippage tolerance applied to the sync `minAmountOut`, in basis points.
+     */
+    function slippageToleranceBps() external view returns (uint256);
 
     /**
      * @notice Returns the timestamp of the most recent sync, or 0 if none has occurred.
