@@ -3,12 +3,12 @@ pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {ICustomSender} from "../../src/interfaces/ICustomSender.sol";
+import {ISwapHandler} from "../../src/interfaces/ISwapHandler.sol";
 
 /// @dev Records the arguments of the last {sync} call so tests can assert on them. When the fee data
-///      says to pay in `GHO`, it pulls the fee from the caller like the real `CustomSender`, so the
+///      says to pay in `GHO`, it pulls the fee from the caller like the real `SwapHandler`, so the
 ///      caller's `GHO` allowance to this contract is genuinely exercised.
-contract MockCustomSender is ICustomSender {
+contract MockSwapHandler is ISwapHandler {
     address public override GHO;
     address public override SGHO;
 

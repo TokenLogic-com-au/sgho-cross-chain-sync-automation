@@ -8,12 +8,12 @@ import {ReceiverTemplate} from "./ReceiverTemplate.sol";
 import {ExtraArgsCodec} from "./libraries/ExtraArgsCodec.sol";
 import {FinalityCodec} from "./libraries/FinalityCodec.sol";
 import {IAggregatorV3} from "./interfaces/IAggregatorV3.sol";
-import {ICustomSender} from "./interfaces/ICustomSender.sol";
+import {ISwapHandler} from "./interfaces/ISwapHandler.sol";
 import {ISyncKeeperConsumer} from "./interfaces/ISyncKeeperConsumer.sol";
 
 /**
  * @title SyncKeeperConsumer Contract
- * @dev The keeper-style consumer that rebalances the two sided oracle pool of a `CustomSender`
+ * @dev The keeper-style consumer that rebalances the two sided oracle pool of a `SwapHandler`
  * through a Chainlink CRE workflow.
  *
  * The oracle pool holds both `GHO` and `SGHO`, and user flow pushes it either way: a deposit puts
@@ -28,15 +28,15 @@ import {ISyncKeeperConsumer} from "./interfaces/ISyncKeeperConsumer.sol";
  *
  * The workflow reads {needsUpkeep} and, when it holds, submits a signed report. The
  * {ReceiverTemplate} validation path then calls {_processReport}, which re-reads both balances,
- * re-derives which token is in surplus, and calls `CustomSender.sync`. The body of the report is
+ * re-derives which token is in surplus, and calls `SwapHandler.sync`. The body of the report is
  * ignored, as every parameter of the sync is derived on chain.
  *
- * This contract must be granted the `SYNC_ROLE` on the `CustomSender`. To cover the CCIP fee it must
+ * This contract must be granted the `SYNC_ROLE` on the `SwapHandler`. To cover the CCIP fee it must
  * hold enough native token when the fee is paid in native, or enough `GHO` when the fee is paid in
- * `GHO`; for the latter it grants the `CustomSender` an unlimited `GHO` allowance at construction so
+ * `GHO`; for the latter it grants the `SwapHandler` an unlimited `GHO` allowance at construction so
  * the sender can pull the fee.
  *
- * {CUSTOM_SENDER}, {GHO} and {SGHO} are immutable and cached from the `CustomSender` at
+ * {SWAP_HANDLER}, {GHO} and {SGHO} are immutable and cached from the `SwapHandler` at
  * construction. The thresholds ({minGhoBalance}, {minSGhoBalance}), the sync parameters
  * ({syncAmount}, {minSyncAmount}, {settlementWindow}, {feeOtoD}) and the feed configuration
  * ({priceFeed}, {maxPriceStaleness}) are owner-updatable.
@@ -45,10 +45,10 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     using SafeERC20 for IERC20;
 
     /// @inheritdoc ISyncKeeperConsumer
-    uint32 public constant MIN_PROCESS_MESSAGE_GAS = 100_000;
+    uint32 public constant MIN_PROCESS_MESSAGE_GAS = 400_000;
 
     /// @inheritdoc ISyncKeeperConsumer
-    address public immutable CUSTOM_SENDER;
+    address public immutable SWAP_HANDLER;
 
     /// @inheritdoc ISyncKeeperConsumer
     address public immutable GHO;
@@ -80,20 +80,20 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     /// @inheritdoc ISyncKeeperConsumer
     uint256 public lastSyncAt;
 
-    /// @dev The encoded CCIP fee data forwarded to `CustomSender.sync`.
+    /// @dev The encoded CCIP fee data forwarded to `SwapHandler.sync`.
     bytes private _feeOtoD;
 
     /// @dev The encoded extra arguments forwarded to the CCIP router.
     bytes private _extraArgs = "";
 
     /**
-     * @dev Sets the immutable values cached from the `CustomSender`, and the initial thresholds,
+     * @dev Sets the immutable values cached from the `SwapHandler`, and the initial thresholds,
      * sync parameters and feed configuration.
      *
      * Requirements:
      *
-     * - `customSender_`, `priceFeed_` and `expectedAuthor_` must not be the zero address.
-     * - The oracle pool, `GHO` and `SGHO` of `customSender_` must not be the zero address.
+     * - `swapHandler_`, `priceFeed_` and `expectedAuthor_` must not be the zero address.
+     * - The oracle pool, `GHO` and `SGHO` of `swapHandler_` must not be the zero address.
      * - `minGhoBalance_`, `minSGhoBalance_`, `syncAmount_` and `minSyncAmount_` must be greater than
      *   0.
      * - `feeOtoD_` must be at least 96 bytes long and encode a gas limit of at least
@@ -110,7 +110,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      *
      * @param forwarder The address of the Chainlink Forwarder contract.
      * @param expectedAuthor_ The address of the workflow owner whose reports are accepted.
-     * @param customSender_ The address of the `CustomSender` contract to sync.
+     * @param swapHandler_ The address of the `SwapHandler` contract to sync.
      * @param priceFeed_ The address of the sGHO/GHO exchange rate feed.
      * @param maxPriceStaleness_ The maximum age tolerated for the price feed answer, in seconds.
      * @param minGhoBalance_ The `GHO` balance below which the pool is considered short of `GHO`.
@@ -123,7 +123,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     constructor(
         address forwarder,
         address expectedAuthor_,
-        address customSender_,
+        address swapHandler_,
         address priceFeed_,
         uint256 maxPriceStaleness_,
         uint256 minGhoBalance_,
@@ -149,9 +149,9 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         _decodeAndValidateFeeOtoD(feeOtoD_);
         _setExpectedAuthor(expectedAuthor_);
 
-        (address gho, address sGho) = _readAndValidateSender(customSender_);
+        (address gho, address sGho) = _readAndValidateSender(swapHandler_);
 
-        CUSTOM_SENDER = customSender_;
+        SWAP_HANDLER = swapHandler_;
         GHO = gho;
         SGHO = sGho;
         priceFeed = priceFeed_;
@@ -163,12 +163,12 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         settlementWindow = settlementWindow_;
         _feeOtoD = feeOtoD_;
 
-        IERC20(gho).forceApprove(customSender_, type(uint256).max);
+        IERC20(gho).forceApprove(swapHandler_, type(uint256).max);
     }
 
     /**
      * @dev Receives the native token used to pay the CCIP fee when it is not paid in `GHO`, and the
-     * excess refunded by the `CustomSender` after each sync.
+     * excess refunded by the `SwapHandler` after each sync.
      */
     receive() external payable {}
 
@@ -287,8 +287,12 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
         );
         if (surplusToken == address(0)) return false;
 
+        // The previous sync's return leg is still settling over CCIP during the window, so signal
+        // no upkeep to avoid stacking corrections on a not-yet-refilled pool.
         if (_inCooldown()) return false;
 
+        // Apply the same price gate the executor applies, so the gate never signals a sync that
+        // {_processReport} would skip on a stale or invalid feed.
         uint256 amount = syncAmount < sendable ? syncAmount : sendable;
         (bool ok, ) = _quote(surplusToken, amount);
 
@@ -363,40 +367,40 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
 
         lastSyncAt = block.timestamp;
 
-        ICustomSender(CUSTOM_SENDER).sync{value: nativeAmount}(
+        ISwapHandler(SWAP_HANDLER).sync{value: nativeAmount}(
             surplusToken,
             amount,
             minAmountOut,
             feeMem,
-            ""
+            _extraArgs
         );
 
         emit SyncPerformed(surplusToken, amount, minAmountOut);
     }
 
     /**
-     * @dev Reads the `GHO` and `SGHO` tokens from the `CustomSender` and validates its configuration.
+     * @dev Reads the `GHO` and `SGHO` tokens from the `SwapHandler` and validates its configuration.
      * Extracted from the constructor so the intermediate reads stay off the constructor's stack.
      *
      * Requirements:
      *
-     * - `customSender_` must not be the zero address.
-     * - The oracle pool, `GHO` and `SGHO` of `customSender_` must not be the zero address.
+     * - `swapHandler_` must not be the zero address.
+     * - The oracle pool, `GHO` and `SGHO` of `swapHandler_` must not be the zero address.
      *
-     * @param customSender_ The address of the `CustomSender` contract to sync.
-     * @return The `GHO` token cached from the `CustomSender`.
-     * @return The `SGHO` token cached from the `CustomSender`.
+     * @param swapHandler_ The address of the `SwapHandler` contract to sync.
+     * @return The `GHO` token cached from the `SwapHandler`.
+     * @return The `SGHO` token cached from the `SwapHandler`.
      */
     function _readAndValidateSender(
-        address customSender_
+        address swapHandler_
     ) private view returns (address, address) {
-        require(customSender_ != address(0), ZeroAddress());
+        require(swapHandler_ != address(0), ZeroAddress());
 
-        address gho = ICustomSender(customSender_).GHO();
-        address sGho = ICustomSender(customSender_).SGHO();
+        address gho = ISwapHandler(swapHandler_).GHO();
+        address sGho = ISwapHandler(swapHandler_).SGHO();
 
         require(
-            ICustomSender(customSender_).getOraclePool() != address(0) &&
+            ISwapHandler(swapHandler_).getOraclePool() != address(0) &&
                 gho != address(0) &&
                 sGho != address(0),
             ZeroAddress()
@@ -406,14 +410,14 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /**
-     * @dev Returns whether the oracle pool is set on the `CustomSender`.
-     * The oracle pool can be unset by the `CustomSender` admin at any time, so it is checked before
+     * @dev Returns whether the oracle pool is set on the `SwapHandler`.
+     * The oracle pool can be unset by the `SwapHandler` admin at any time, so it is checked before
      * every read of the pool balances.
      *
      * @return True if the oracle pool is set.
      */
     function _validateOracle() internal view returns (bool) {
-        return ICustomSender(CUSTOM_SENDER).getOraclePool() != address(0);
+        return ISwapHandler(SWAP_HANDLER).getOraclePool() != address(0);
     }
 
     /**
@@ -466,7 +470,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
     }
 
     /**
-     * @dev Returns both token balances of the oracle pool of the `CustomSender`.
+     * @dev Returns both token balances of the oracle pool of the `SwapHandler`.
      *
      * Requirements:
      *
@@ -476,7 +480,7 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      * @return The `SGHO` balance of the oracle pool.
      */
     function _poolBalances() private view returns (uint256, uint256) {
-        address pool = ICustomSender(CUSTOM_SENDER).getOraclePool();
+        address pool = ISwapHandler(SWAP_HANDLER).getOraclePool();
 
         return (IERC20(GHO).balanceOf(pool), IERC20(SGHO).balanceOf(pool));
     }

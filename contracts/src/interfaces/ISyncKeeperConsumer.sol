@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 /**
  * @title ISyncKeeperConsumer Interface
  * @dev The interface of the {SyncKeeperConsumer} contract, the keeper-style consumer that rebalances
- * the two sided oracle pool of a `CustomSender` through a Chainlink CRE workflow.
+ * the two sided oracle pool of a `SwapHandler` through a Chainlink CRE workflow.
  *
  * The oracle pool holds both `GHO` and `SGHO`, and user flow pushes it either way: a deposit takes
  * `SGHO` out and puts `GHO` in, a redeem does the reverse. A sync corrects the imbalance by sending
@@ -116,7 +116,7 @@ interface ISyncKeeperConsumer {
     );
 
     /**
-     * Emitted when a report is processed while the oracle pool is not set on the `CustomSender`,
+     * Emitted when a report is processed while the oracle pool is not set on the `SwapHandler`,
      * meaning no sync is performed.
      */
     event SyncSkippedOracleMisconfigured();
@@ -248,7 +248,7 @@ interface ISyncKeeperConsumer {
     function setSettlementWindow(uint256 newWindow) external;
 
     /**
-     * @dev Sets the CCIP fee data forwarded to `CustomSender.sync`.
+     * @dev Sets the CCIP fee data forwarded to `SwapHandler.sync`.
      * The fee data is the encoding of `(uint128 maxFeeOtoD, bool payInGhoOtoD, uint32 gasLimitOtoD)`.
      * When the fee is paid in native token, this contract must hold enough native token to cover
      * `maxFeeOtoD` on each sync.
@@ -299,17 +299,17 @@ interface ISyncKeeperConsumer {
     function MIN_PROCESS_MESSAGE_GAS() external view returns (uint32);
 
     /**
-     * @notice Returns the address of the `CustomSender` contract synced by this contract.
+     * @notice Returns the address of the `SwapHandler` contract synced by this contract.
      */
-    function CUSTOM_SENDER() external view returns (address);
+    function SWAP_HANDLER() external view returns (address);
 
     /**
-     * @notice Returns the address of the `GHO` token, as cached from the `CustomSender`.
+     * @notice Returns the address of the `GHO` token, as cached from the `SwapHandler`.
      */
     function GHO() external view returns (address);
 
     /**
-     * @notice Returns the address of the `SGHO` token, as cached from the `CustomSender`.
+     * @notice Returns the address of the `SGHO` token, as cached from the `SwapHandler`.
      */
     function SGHO() external view returns (address);
 
@@ -354,7 +354,7 @@ interface ISyncKeeperConsumer {
     function lastSyncAt() external view returns (uint256);
 
     /**
-     * @notice Returns the encoded CCIP fee data forwarded to `CustomSender.sync`.
+     * @notice Returns the encoded CCIP fee data forwarded to `SwapHandler.sync`.
      */
     function feeOtoD() external view returns (bytes memory);
 
