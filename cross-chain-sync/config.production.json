@@ -1,6 +1,6 @@
 {
   "schedule": "0 */4 * * *",
-  "chainSelectorName": "ethereum-mainnet",
+  "chainSelectorName": "ethereum-mainnet-arbitrum-1",
   "isTestnet": false,
   "consumerAddress": "0x0000000000000000000000000000000000000001",
   "gasLimit": "750000"

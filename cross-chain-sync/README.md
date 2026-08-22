@@ -70,7 +70,7 @@ Validated by [`config.ts`](config.ts). All addresses are checksummed `0x` + 40 h
 | Field               | Description                                                                                        |
 | ------------------- | -------------------------------------------------------------------------------------------------- |
 | `schedule`          | Cron expression, e.g. `0 */4 * * *` (every 4 hours at minute 0).                                   |
-| `chainSelectorName` | CRE / chain-selectors name, e.g. `ethereum-testnet-sepolia`, `ethereum-mainnet`.                   |
+| `chainSelectorName` | CRE / chain-selectors name of the **origin** chain hosting the consumer, e.g. `ethereum-mainnet-arbitrum-1`. **Not** the mainnet CCIP destination. |
 | `isTestnet`         | Passed to `getNetwork()` (must match the chain you use).                                           |
 | `consumerAddress`   | Deployed **`SyncKeeperConsumer`** (IReceiver); target of `writeReport` and of `needsUpkeep` reads. |
 | `gasLimit`          | Gas limit string for `writeReport`, e.g. `"750000"`.                                               |
@@ -89,7 +89,7 @@ Validated by [`config.ts`](config.ts). All addresses are checksummed `0x` + 40 h
 
 ### `project.yaml` (repo root)
 
-- **`rpcs`**: RPC URL per `chain-name` must match the chain in your config (`ethereum-testnet-sepolia`, etc.). Use `${VAR}` for secrets.
+- **`rpcs`**: RPC URL per `chain-name` must match the chain in your config (`ethereum-mainnet-arbitrum-1`, `ethereum-testnet-sepolia-arbitrum-1`, etc.). Use `${VAR}` for secrets.
 - **`workflow.yaml`** (here): maps each **target** to `workflow-path`, `config-path`, and workflow registry name.
 
 ---
@@ -271,6 +271,7 @@ CRE CLI loads `.env` from the working directory where you invoke `cre`.
 ### 2. Align `project.yaml` and config
 
 - `project.yaml` → `rpcs[].chain-name` must match `chainSelectorName` / network in your JSON config.
+- Both must name the **origin** chain that hosts `SyncKeeperConsumer`, the `SwapHandler`, and the oracle pool — the chain a sync sends *from*, not the mainnet vault it sends *to*. Naming the destination fails closed (`needsUpkeep()` against a codeless address returns empty data, which the workflow turns into an error), but only at the first cron tick, so verify it before deploying: read `needsUpkeep()` at `consumerAddress` over the configured RPC and confirm it answers.
 - `config.*.json` → real `consumerAddress` (deployed `SyncKeeperConsumer` with correct on-chain thresholds, `syncAmount`, `minSyncAmount`, `settlementWindow`, `priceFeed`, and `feeData`).
 
 ### 3. Run simulator
