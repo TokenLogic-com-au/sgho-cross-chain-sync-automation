@@ -31,14 +31,18 @@
 #       forwarder: "0x..."                          # Forwarder contract address on the chain
 
 # ==========================================================================
+# For both targets, `chain-name` must be the ORIGIN chain that hosts `SyncKeeperConsumer`, the
+# `SwapHandler`, and the oracle pool, not the destination the handler sends to over CCIP. It must
+# also match `chainSelectorName` in the matching `cross-chain-sync/config.*.json`. The endpoints
+# below are public placeholders; replace them with your own provider before deploying.
 staging-settings:
   rpcs:
-    - chain-name: ethereum-testnet-sepolia
-      url: https://ethereum-sepolia-rpc.publicnode.com
+    - chain-name: ethereum-testnet-sepolia-arbitrum-1
+      url: https://sepolia-rollup.arbitrum.io/rpc
 
 # ==========================================================================
 production-settings:
   rpcs:
-    - chain-name: ethereum-testnet-sepolia
-      url: https://ethereum-sepolia-rpc.publicnode.com
+    - chain-name: ethereum-mainnet-arbitrum-1
+      url: https://arb1.arbitrum.io/rpc
 

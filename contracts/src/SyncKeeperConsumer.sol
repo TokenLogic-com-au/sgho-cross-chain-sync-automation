@@ -545,6 +545,25 @@ contract SyncKeeperConsumer is ReceiverTemplate, ISyncKeeperConsumer {
      * possible. A feed answer that is non-positive, stale, or timestamped in the future yields
      * `ok == false` rather than a revert, upholding the no-revert-so-no-retry design.
      *
+     * The rate is deliberately read from a feed independent of the oracle pool's own price path.
+     * The pool clips an upward answer to a growth cap and rejects an answer below the last one it
+     * accepted, but that guard governs the pool's local swaps only: a sync pulls inventory through
+     * the pool's balance-checked withdrawal, which never consults the price, and the minimum quoted
+     * here is enforced on the mainnet leg by the `CrossChainERC4626Adapter` converting through the
+     * real `SGHO` ERC4626 vault. The vault's own conversion is therefore the rate this quote has to
+     * track, so the pool's capped rate is a different domain and pricing against it would not make
+     * the destination leg any likelier to succeed. No cap or monotonic check is applied here for
+     * that reason: the answer is validated for sign and age only, and the quote is defense in depth
+     * against a grossly wrong conversion rather than a value guarantee. A sync dispatched with
+     * `minAmountOut == 0` would still settle at whatever rate the mainnet vault gives, so the worst
+     * case from a fresh but wrong answer is a destination leg that misses its minimum and leaves the
+     * transfer in the adapter's failed-message state for an operator to recover, not a settlement
+     * priced against a manipulated rate.
+     *
+     * Deployment must therefore point {priceFeed} at the feed tracking the mainnet `SGHO` vault
+     * exchange rate, quoted as `GHO` assets per share and NOT inverted. A reciprocal feed, such as
+     * one wrapped with inversion for the pool, prices every sync backwards.
+     *
      * @param tokenIn The address of the token being sent, either `GHO` or `SGHO`.
      * @param amountIn The amount of `tokenIn` being sent.
      * @return Whether the feed answer is usable (positive and within {maxPriceStaleness}).
